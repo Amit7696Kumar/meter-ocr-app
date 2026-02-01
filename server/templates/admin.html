@@ -1,0 +1,381 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Admin — Meter OCR</title>
+
+  <link rel="stylesheet" href="/static/app.css">
+  <script src="/static/app.js" defer></script>
+
+  <!-- Small safe UI polish for this page only (won’t break your existing CSS) -->
+  <style>
+    .topbar-actions { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+    .panel-header-row { display:flex; justify-content:space-between; gap:12px; flex-wrap:wrap; align-items:flex-start; }
+    .filters { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+    .table-wrap { overflow:auto; border-radius: 12px; }
+    .linklike { background: none; border: none; padding: 0; cursor: pointer; text-decoration: underline; }
+    .imggrid { display:grid; grid-template-columns:1fr; gap:10px; }
+    .imgcard { border:1px solid rgba(255,255,255,.12); border-radius:12px; padding:10px; }
+    .imgcard img { width:100%; border-radius:10px; display:block; }
+    .imgcap { display:flex; justify-content:space-between; gap:10px; align-items:center; margin-bottom:8px; }
+    .imgcap .small-muted { margin:0; }
+    .modal { display:none; position:fixed; inset:0; background:rgba(0,0,0,.55); z-index:9999; padding:18px; }
+    .modal.open { display:block; }
+    .modal-card { max-width:1100px; margin:0 auto; }
+    @media (min-width: 980px){
+      .imggrid { grid-template-columns: 1fr 1fr; }
+    }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+  </style>
+</head>
+
+<body>
+
+<!-- NAV -->
+<div class="nav">
+  <div class="nav-inner">
+    <div class="brand">
+      <div class="logo"></div>
+      <div>
+        <div>Meter OCR</div>
+        <div class="small-muted">Admin Dashboard</div>
+      </div>
+    </div>
+
+    <div class="badges">
+      <div class="badge">Role: <strong>ADMIN</strong></div>
+      <div class="badge">Unread Alerts: <strong id="unreadBadge">{{ unread_count }}</strong></div>
+      <a class="btn" href="/logout">Logout</a>
+    </div>
+  </div>
+</div>
+
+<div class="container">
+
+  <div class="grid2">
+
+    <!-- LIVE ALERTS -->
+    <div class="panel">
+      <div class="panel-header">
+        <div class="panel-header-row">
+          <div>
+            <div class="panel-title">Live Alerts</div>
+            <div class="panel-sub">Auto-refresh every 10 seconds</div>
+          </div>
+          <div class="topbar-actions">
+            <a class="btn" href="/download/csv/admin">Download All CSV</a>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel-body">
+        <!-- app.js will fill this -->
+        <div id="alertsLive" data-role="admin"></div>
+
+        <div class="small-muted" style="margin-top:10px;">
+          Tip: Click “Mark Read” to clear alerts from unread count.
+        </div>
+      </div>
+    </div>
+
+    <!-- TEAMS -->
+    <div class="panel">
+      <div class="panel-header">
+        <div>
+          <div class="panel-title">Teams</div>
+          <div class="panel-sub">Open coadmin view and download CSV</div>
+        </div>
+      </div>
+<div class="panel-body">
+  <div class="topbar-actions">
+
+    {% set team_names = {
+      1: "104 Bde",
+      2: "268 Bde",
+      3: "53 Bde",
+      4: "109 Bde",
+      5: "28 Arty Bde"
+    } %}
+
+    {% for t in teams %}
+      <a class="btn" href="/coadmin/{{ t }}">
+        {{ team_names.get(t, "Team " ~ t) }}
+      </a>
+      <a class="btn small" href="/download/csv/team/{{ t }}">
+        CSV
+      </a>
+    {% endfor %}
+
+  </div>
+</div>
+
+        <div class="divider"></div>
+        <div class="small-muted"></div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- ALL READINGS -->
+  <div class="panel" style="margin-top:16px;">
+    <div class="panel-header">
+      <div class="panel-header-row">
+        <div>
+          <div class="panel-title">All Readings</div>
+          <div class="panel-sub">Click a value or “View” to open details in the same page</div>
+        </div>
+
+        <div class="filters">
+          <input id="searchReadings" class="input" placeholder="Search team/user/label/value..." />
+          <select id="meterFilter">
+            <option value="all">All meter types</option>
+            <option value="earthing">Earthing</option>
+            <option value="temp">Temp</option>
+          </select>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel-body">
+      {% if readings and readings|length > 0 %}
+      <div class="table-wrap">
+        <table class="table" id="readingsTable">
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Team</th>
+              <th>User</th>
+              <th>Meter</th>
+              <th>Label</th>
+              <th>Value</th>
+              <th>Status</th>
+              <th>Image</th>
+            </tr>
+          </thead>
+
+          <tbody>
+            {% for r in readings %}
+              {% set created_at = r['created_at'] if r is mapping else r.created_at %}
+              {% set team = r['team'] if r is mapping else r.team %}
+              {% set username = r['username'] if r is mapping else r.username %}
+              {% set meter_type = r['meter_type'] if r is mapping else r.meter_type %}
+              {% set label = r['label'] if r is mapping else r.label %}
+              {% set value = r['value'] if r is mapping else r.value %}
+              {% set filename = r['filename'] if r is mapping else r.filename %}
+              {% set ocr_json = r['ocr_json'] if r is mapping else r.ocr_json %}
+              {% set status = r['status'] if r is mapping else r.status %}
+              {% set status_class = r['status_class'] if r is mapping else r.status_class %}
+              {% set debug_yolo = r['debug_yolo'] if r is mapping else r.debug_yolo %}
+              {% set debug_crop = r['debug_crop'] if r is mapping else r.debug_crop %}
+              {% set debug_prep = r['debug_prep'] if r is mapping else r.debug_prep %}
+
+              <tr
+                data-meter="{{ meter_type }}"
+                data-team="{{ team }}"
+                data-user="{{ username }}"
+                data-label="{{ label }}"
+                data-created="{{ created_at }}"
+                data-value="{{ value or '' }}"
+                data-filename="{{ filename or '' }}"
+                data-ocrjson="{{ (ocr_json or '')|e }}"
+                data-debug-yolo="{{ debug_yolo or '' }}"
+                data-debug-crop="{{ debug_crop or '' }}"
+                data-debug-prep="{{ debug_prep or '' }}"
+              >
+                <td>{{ created_at }}</td>
+                <td><b>{{ team }}</b></td>
+                <td>{{ username }}</td>
+                <td><b>{{ meter_type }}</b></td>
+                <td>{{ label }}</td>
+
+                <td>
+                  {% if value %}
+                    <button class="linklike js-open-reading" type="button">{{ value }}</button>
+                  {% else %}
+                    <span class="small-muted">-</span>
+                  {% endif %}
+                </td>
+
+                <td>
+                  {% if status %}
+                    <span class="pill {{ status_class }}">{{ status }}</span>
+                  {% else %}
+                    <span class="small-muted">-</span>
+                  {% endif %}
+                </td>
+
+                <td>
+                  {% if filename %}
+                    <!-- IMPORTANT: This will open inside modal (same page) -->
+                    <button class="btn small js-open-image" type="button">View</button>
+                  {% else %}
+                    -
+                  {% endif %}
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% else %}
+        <div class="small-muted">No readings yet.</div>
+      {% endif %}
+    </div>
+  </div>
+
+</div>
+
+<!-- MODAL -->
+<div class="modal" id="modal" aria-hidden="true">
+  <div class="modal-card">
+    <div class="modal-head">
+      <div>
+        <div class="modal-title" id="modalTitle">Reading</div>
+        <div class="small-muted" id="modalSub"></div>
+      </div>
+      <button class="btn" type="button" id="modalClose">Close</button>
+    </div>
+
+    <div class="modal-body">
+      <div class="grid2">
+
+        <div class="panel" style="margin:0;">
+          <div class="panel-header">
+            <div>
+              <div class="panel-title">Images</div>
+              <div class="panel-sub">Uploaded + YOLO + crop + preprocess</div>
+            </div>
+          </div>
+          <div class="panel-body">
+            <div class="imggrid" id="modalImages"></div>
+          </div>
+        </div>
+
+        <div class="panel" style="margin:0;">
+          <div class="panel-header">
+            <div>
+              <div class="panel-title">OCR JSON</div>
+              <div class="panel-sub">Raw OCR output for debugging</div>
+            </div>
+          </div>
+          <div class="panel-body">
+            <pre id="modalJson" class="mono" style="max-height:420px; overflow:auto;"></pre>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  function qs(sel, el=document){ return el.querySelector(sel); }
+  function qsa(sel, el=document){ return Array.from(el.querySelectorAll(sel)); }
+
+  const modal = qs("#modal");
+  const modalClose = qs("#modalClose");
+  const modalTitle = qs("#modalTitle");
+  const modalSub = qs("#modalSub");
+  const modalImages = qs("#modalImages");
+  const modalJson = qs("#modalJson");
+
+  function openModal() {
+    modal.classList.add("open");
+    modal.setAttribute("aria-hidden", "false");
+  }
+  function closeModal() {
+    modal.classList.remove("open");
+    modal.setAttribute("aria-hidden", "true");
+  }
+
+  function safePrettyJson(raw) {
+    if (!raw) return "";
+    try {
+      const obj = JSON.parse(raw);
+      return JSON.stringify(obj, null, 2);
+    } catch (e) {
+      // If already non-json / truncated etc.
+      return raw;
+    }
+  }
+
+  function buildImages(row) {
+    const filename = row.dataset.filename || "";
+    const yolo = row.dataset.debugYolo || "";
+    const crop = row.dataset.debugCrop || "";
+    const prep = row.dataset.debugPrep || "";
+
+    const imgs = [];
+
+    if (filename) imgs.push({ title: "Uploaded", src: "/uploads/" + filename });
+    if (yolo) imgs.push({ title: "YOLO", src: yolo });
+    if (crop) imgs.push({ title: "Crop", src: crop });
+    if (prep) imgs.push({ title: "Preprocess", src: prep });
+
+    modalImages.innerHTML = "";
+
+    if (!imgs.length) {
+      modalImages.innerHTML = '<div class="small-muted">No images available.</div>';
+      return;
+    }
+
+    imgs.forEach(item => {
+      const div = document.createElement("div");
+      div.className = "imgcard";
+      div.innerHTML = `
+        <div class="imgcap">
+          <div class="small-muted"><b>${item.title}</b></div>
+        </div>
+        <img src="${item.src}" alt="${item.title}" />
+      `;
+      modalImages.appendChild(div);
+    });
+  }
+
+  function openRow(row) {
+    const created = row.dataset.created || "";
+    const team = row.dataset.team || "";
+    const user = row.dataset.user || "";
+    const meter = row.dataset.meter || "";
+    const label = row.dataset.label || "";
+    const value = row.dataset.value || "";
+
+    modalTitle.textContent = `Team ${team} • ${meter.toUpperCase()} • ${value || "-"}`;
+    modalSub.textContent = `${created} — ${user} — ${label}`;
+
+    const rawJson = row.dataset.ocrjson || "";
+    modalJson.textContent = safePrettyJson(rawJson);
+
+    buildImages(row);
+    openModal();
+  }
+
+  // Close handlers
+  modalClose?.addEventListener("click", closeModal);
+  modal?.addEventListener("click", (e) => { if (e.target === modal) closeModal(); });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeModal(); });
+
+  // Wiring: clicking value OR View button opens same modal
+  document.addEventListener("click", (e) => {
+    const btnValue = e.target.closest(".js-open-reading");
+    const btnImg = e.target.closest(".js-open-image");
+    if (!btnValue && !btnImg) return;
+
+    const row = e.target.closest("tr");
+    if (!row) return;
+    openRow(row);
+  });
+
+  // Keep your existing filtering if you already have it
+  document.addEventListener("DOMContentLoaded", () => {
+    if (typeof setupFiltering === "function") {
+      setupFiltering("readingsTable", "searchReadings", "meterFilter");
+    }
+  });
+})();
+</script>
+
+</body>
+</html>

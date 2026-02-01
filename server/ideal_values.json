@@ -1,0 +1,4 @@
+{
+  "earthing": { "min": 0, "max": 2 },
+  "temp": { "min": 0, "max": 30 }
+}

@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+
+  {% set team_names = {
+    1: "104 Bde",
+    2: "268 Bde",
+    3: "53 Bde",
+    4: "109 Bde",
+    5: "28 Arty Bde"
+  } %}
+
+  <title>
+    Coadmin — {{ team_names.get(team_id, "Team " ~ team_id) }}
+  </title>
+
+  <link rel="stylesheet" href="/static/app.css">
+  <script src="/static/app.js"></script>
+</head>
+
+<div class="nav">
+  <div class="nav-inner">
+    <div class="brand">
+      <div class="logo"></div>
+      <div>
+        <div>Meter OCR</div>
+        <div class="small-muted">Team Dashboard</div>
+      </div>
+    </div>
+    <div class="badges">
+      <div class="badge">Role: <strong>{{ user.role }}</strong></div>
+      <div class="badge">Team: <strong>{{ team_id }}</strong></div>
+      <div class="badge">Unread Alerts: <strong>{{ unread_count }}</strong></div>
+      <a class="btn" href="/logout">Logout</a>
+    </div>
+  </div>
+</div>
+
+<div class="container">
+
+  <div class="kpi">
+    <div class="card">
+      <div class="label">Total Readings</div>
+      <div class="value">{{ readings|length if readings else 0 }}</div>
+    </div>
+    <div class="card">
+      <div class="label">Total Alerts</div>
+      <div class="value">{{ alerts|length if alerts else 0 }}</div>
+    </div>
+    <div class="card">
+      <div class="label">Unread Alerts</div>
+      <div class="value">{{ unread_count }}</div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="tabs">
+      <div class="tab active" data-tab="readings">Readings</div>
+      <div class="tab" data-tab="alerts">Alerts</div>
+    </div>
+
+    <!-- READINGS -->
+    <div class="tab-content active" data-tab-content="readings">
+
+      <div class="filters">
+        <input id="searchReadings" class="input" placeholder="Search label / value / user..." />
+        <select id="meterFilter">
+          <option value="all">All meter types</option>
+          <option value="earthing">Earthing</option>
+          <option value="temp">Temp</option>
+        </select>
+      </div>
+
+      {% if readings and readings|length > 0 %}
+      <table class="table" id="readingsTable">
+        <thead>
+          <tr>
+            <th>Time</th>
+            <th>User</th>
+            <th>Meter</th>
+            <th>Label</th>
+            <th>Value</th>
+            <th>Image</th>
+            <th>Debug</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for r in readings %}
+          <tr data-meter="{{ r.meter_type }}">
+            <td>{{ r.created_at }}</td>
+            <td>{{ r.username }}</td>
+            <td>{{ r.meter_type }}</td>
+            <td><b>{{ r.label }}</b></td>
+            <td>
+              {% if r.value %}
+                <b>{{ r.value }}</b>
+              {% else %}
+                <span class="small-muted">-</span>
+              {% endif %}
+            </td>
+            <td>
+              {% if r.filename %}
+                <a href="/uploads/{{ r.filename }}" target="_blank">Open</a>
+              {% else %}
+                -
+              {% endif %}
+            </td>
+            <td>
+              {% set o = r.ocr_obj %}
+              {% if o and o.debug_urls %}
+                <details>
+                  <summary>Show debug images</summary>
+                  <div class="imggrid">
+                    {% if o.debug_urls.yolo %}<img src="{{ o.debug_urls.yolo }}">{% endif %}
+                    {% if o.debug_urls.crop %}<img src="{{ o.debug_urls.crop }}">{% endif %}
+                    {% if o.debug_urls.prep %}<img src="{{ o.debug_urls.prep }}">{% endif %}
+                  </div>
+                </details>
+              {% else %}
+                <span class="small-muted">No debug</span>
+              {% endif %}
+
+              <details>
+                <summary>OCR JSON</summary>
+                <pre>{{ r.ocr_json }}</pre>
+              </details>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+
+      <script>
+        document.addEventListener("DOMContentLoaded", () => {
+          setupFiltering("readingsTable", "searchReadings", "meterFilter");
+        });
+      </script>
+
+      {% else %}
+        <div class="small-muted">No readings uploaded for Team {{ team_id }} yet.</div>
+      {% endif %}
+    </div>
+
+    <!-- ALERTS -->
+    <div class="tab-content" data-tab-content="alerts">
+      {% if alerts and alerts|length > 0 %}
+        {% for a in alerts %}
+          <div class="toast {% if a.severity == 'high' %}error{% elif a.severity == 'low' %}error{% else %}ok{% endif %}">
+            <div style="display:flex; justify-content:space-between; gap:10px; align-items:flex-start;">
+              <div>
+                <div>
+                  <span class="pill {% if a.severity == 'high' %}high{% elif a.severity == 'low' %}low{% else %}ok{% endif %}">
+                    {{ a.severity|upper }}
+                  </span>
+                  <span style="margin-left:8px; font-weight:800;">{{ a.message }}</span>
+                </div>
+                <div class="small-muted">Created: {{ a.created_at }} • {% if a.is_read %}Read{% else %}Unread{% endif %}</div>
+              </div>
+
+              {% if not a.is_read %}
+              <form method="post" action="/alerts/{{ a.id }}/read">
+                <button class="btn small" type="submit">Mark Read</button>
+              </form>
+              {% endif %}
+            </div>
+          </div>
+        {% endfor %}
+      {% else %}
+        <div class="small-muted">No alerts for this team yet.</div>
+      {% endif %}
+    </div>
+
+  </div>
+</div>
+
+</body>
+</html>

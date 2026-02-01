@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>User — Meter OCR</title>
+
+  <link rel="stylesheet" href="/static/app.css">
+  <script src="/static/app.js" defer></script>
+
+  <!-- Page-only polish (safe + minimal) -->
+  <style>
+    .panel-header-row { display:flex; justify-content:space-between; gap:12px; flex-wrap:wrap; align-items:flex-start; }
+    .actions { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+    .filters { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+    .table-wrap { overflow:auto; border-radius:12px; }
+    .linklike { background:none; border:none; padding:0; cursor:pointer; text-decoration:underline; }
+    .helpbox { margin-top:10px; padding:10px 12px; border-radius:12px; border:1px solid rgba(255,255,255,.12); }
+    .helpbox ul { margin:8px 0 0 18px; }
+    .modal { display:none; position:fixed; inset:0; background:rgba(0,0,0,.55); z-index:9999; padding:18px; }
+    .modal.open { display:block; }
+    .modal-card { max-width:1100px; margin:0 auto; }
+    .imggrid { display:grid; grid-template-columns:1fr; gap:10px; }
+    .imgcard { border:1px solid rgba(255,255,255,.12); border-radius:12px; padding:10px; }
+    .imgcard img { width:100%; border-radius:10px; display:block; }
+    .imgcap { display:flex; justify-content:space-between; gap:10px; align-items:center; margin-bottom:8px; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+    @media (min-width: 980px){ .imggrid { grid-template-columns: 1fr 1fr; } }
+  </style>
+</head>
+
+<body>
+
+<!-- NAV -->
+<div class="nav">
+  <div class="nav-inner">
+    <div class="brand">
+      <div class="logo"></div>
+      <div>
+        <div>Meter OCR</div>
+        <div class="small-muted">User Dashboard</div>
+      </div>
+    </div>
+
+    <div class="badges">
+      <div class="badge">Team: <strong>{{ user.team }}</strong></div>
+      <div class="badge">User: <strong>{{ user.username }}</strong></div>
+      <a class="btn" href="/logout">Logout</a>
+    </div>
+  </div>
+</div>
+
+<div class="container">
+
+  {% if error %}
+    <div class="toast error">{{ error }}</div>
+  {% endif %}
+
+  <!-- UPLOAD -->
+  <div class="panel">
+    <div class="panel-header">
+      <div class="panel-header-row">
+        <div>
+          <div class="panel-title">Upload Meter Image</div>
+          <div class="panel-sub">Choose meter type + label, upload image, and we’ll read the value.</div>
+        </div>
+
+        <div class="actions">
+          <a class="btn" href="/download/csv/my">Download My CSV</a>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel-body">
+      <form method="post" action="/upload" enctype="multipart/form-data" class="stack">
+        <label class="field">
+          <span>Meter Type</span>
+          <select class="input" name="meter_type" required>
+            <option value="earthing">Earthing</option>
+            <option value="temp">Temp</option>
+          </select>
+        </label>
+
+        <label class="field">
+          <span>Label</span>
+          <input class="input" name="label" placeholder="e.g. Panel-1 / DG Room / Site-A" required>
+        </label>
+
+        <label class="field">
+          <span>Image</span>
+          <input class="input" type="file" name="image" accept=".jpg,.jpeg,.png,.webp" required>
+        </label>
+
+        <button class="btn primary full" id="uploadBtn" type="submit">Upload & Read</button>
+<div class="small-muted" id="uploadMsg" style="display:none;margin-top:10px;">
+  Processing… please wait
+</div>
+
+      </form>
+
+      <div class="helpbox">
+        <div class="small-muted"><b>Tips for best accuracy</b></div>
+        <ul class="small-muted">
+          <li>Keep the meter display centered and in focus.</li>
+          <li>Avoid glare / reflection; tilt phone slightly if needed.</li>
+          <li>Use PNG/JPG/WebP; avoid screenshots of screenshots.</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <!-- RECENT READINGS -->
+  <div class="panel" style="margin-top:16px;">
+    <div class="panel-header">
+      <div class="panel-header-row">
+        <div>
+          <div class="panel-title">My Recent Readings</div>
+          <div class="panel-sub">Click value or “View” to open details (same page)</div>
+        </div>
+
+        <div class="filters">
+          <input id="searchReadings" class="input" placeholder="Search label/value/type..." />
+          <select id="meterFilter">
+            <option value="all">All meter types</option>
+            <option value="earthing">Earthing</option>
+            <option value="temp">Temp</option>
+          </select>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel-body">
+      {% if readings and readings|length > 0 %}
+      <div class="table-wrap">
+        <table class="table" id="readingsTable">
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Meter</th>
+              <th>Label</th>
+              <th>Value</th>
+              <th>Status</th>
+              <th>Image</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for r in readings %}
+            <tr
+              data-meter="{{ r.meter_type }}"
+              data-filename="{{ r.filename }}"
+              data-ocrjson="{{ (r.ocr_json or '')|e }}"
+              data-debug-yolo="{{ r.debug_yolo or '' }}"
+              data-debug-crop="{{ r.debug_crop or '' }}"
+              data-debug-prep="{{ r.debug_prep or '' }}"
+              data-value="{{ r.value or '' }}"
+              data-created="{{ r.created_at }}"
+              data-label="{{ r.label }}"
+            >
+              <td>{{ r.created_at }}</td>
+              <td><b>{{ r.meter_type }}</b></td>
+              <td>{{ r.label }}</td>
+
+              <td>
+                {% if r.value %}
+                  <button class="linklike js-open-reading" type="button">{{ r.value }}</button>
+                {% else %}
+                  <span class="small-muted">-</span>
+                {% endif %}
+              </td>
+
+              <td>
+                {% if r.status %}
+                  <span class="pill {{ r.status_class }}">{{ r.status }}</span>
+                {% else %}
+                  <span class="small-muted">-</span>
+                {% endif %}
+              </td>
+
+              <td>
+                {% if r.filename %}
+                  <button class="btn small js-open-image" type="button">View</button>
+                {% else %}
+                  -
+                {% endif %}
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% else %}
+        <div class="small-muted">No readings yet.</div>
+      {% endif %}
+    </div>
+  </div>
+
+</div>
+
+<!-- MODAL -->
+<div class="modal" id="modal" aria-hidden="true">
+  <div class="modal-card">
+    <div class="modal-head">
+      <div>
+        <div class="modal-title" id="modalTitle">Reading</div>
+        <div class="small-muted" id="modalSub"></div>
+      </div>
+      <button class="btn" type="button" id="modalClose">Close</button>
+    </div>
+
+    <div class="modal-body">
+      <div class="grid2">
+
+        <div class="panel" style="margin:0;">
+          <div class="panel-header">
+            <div>
+              <div class="panel-title">Images</div>
+              <div class="panel-sub">Uploaded + YOLO + crop + preprocess</div>
+            </div>
+          </div>
+          <div class="panel-body">
+            <div class="imggrid" id="modalImages"></div>
+          </div>
+        </div>
+
+        <div class="panel" style="margin:0;">
+          <div class="panel-header">
+            <div>
+              <div class="panel-title">OCR JSON</div>
+              <div class="panel-sub">Raw OCR output for debugging</div>
+            </div>
+          </div>
+          <div class="panel-body">
+            <pre id="modalJson" class="mono" style="max-height:420px; overflow:auto;"></pre>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  function qs(sel, el=document){ return el.querySelector(sel); }
+  function safePrettyJson(raw) {
+    if (!raw) return "";
+    try { return JSON.stringify(JSON.parse(raw), null, 2); }
+    catch (e) { return raw; }
+  }
+
+  const modal = qs("#modal");
+  const modalClose = qs("#modalClose");
+  const modalTitle = qs("#modalTitle");
+  const modalSub = qs("#modalSub");
+  const modalImages = qs("#modalImages");
+  const modalJson = qs("#modalJson");
+
+  function openModal() {
+    modal.classList.add("open");
+    modal.setAttribute("aria-hidden", "false");
+  }
+  function closeModal() {
+    modal.classList.remove("open");
+    modal.setAttribute("aria-hidden", "true");
+  }
+
+  function buildImages(row) {
+    const filename = row.dataset.filename || "";
+    const yolo = row.dataset.debugYolo || "";
+    const crop = row.dataset.debugCrop || "";
+    const prep = row.dataset.debugPrep || "";
+
+    const imgs = [];
+    if (filename) imgs.push({ title: "Uploaded", src: "/uploads/" + filename });
+    if (yolo) imgs.push({ title: "YOLO", src: yolo });
+    if (crop) imgs.push({ title: "Crop", src: crop });
+    if (prep) imgs.push({ title: "Preprocess", src: prep });
+
+    modalImages.innerHTML = "";
+
+    if (!imgs.length) {
+      modalImages.innerHTML = '<div class="small-muted">No images available.</div>';
+      return;
+    }
+
+    imgs.forEach(item => {
+      const div = document.createElement("div");
+      div.className = "imgcard";
+      div.innerHTML = `
+        <div class="imgcap">
+          <div class="small-muted"><b>${item.title}</b></div>
+        </div>
+        <img src="${item.src}" alt="${item.title}" />
+      `;
+      modalImages.appendChild(div);
+    });
+  }
+
+  function openRow(row) {
+    const created = row.dataset.created || "";
+    const meter = (row.dataset.meter || "").toUpperCase();
+    const label = row.dataset.label || "";
+    const value = row.dataset.value || "-";
+
+    modalTitle.textContent = `${meter} • ${value}`;
+    modalSub.textContent = `${created} — ${label}`;
+
+    modalJson.textContent = safePrettyJson(row.dataset.ocrjson || "");
+    buildImages(row);
+    openModal();
+  }
+
+  // Close handlers
+  modalClose?.addEventListener("click", closeModal);
+  modal?.addEventListener("click", (e) => { if (e.target === modal) closeModal(); });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeModal(); });
+
+  // Click value OR View -> open modal (same page)
+  document.addEventListener("click", (e) => {
+    const btnValue = e.target.closest(".js-open-reading");
+    const btnImg = e.target.closest(".js-open-image");
+    if (!btnValue && !btnImg) return;
+
+    const row = e.target.closest("tr");
+    if (!row) return;
+    openRow(row);
+  });
+
+  // Keep your existing filtering if app.js provides it
+  document.addEventListener("DOMContentLoaded", () => {
+    if (typeof setupFiltering === "function") {
+      setupFiltering("readingsTable", "searchReadings", "meterFilter");
+    }
+  });
+})();
+</script>
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+  const form = document.querySelector("form[action='/upload']");
+  const btn = document.getElementById("uploadBtn");
+  const msg = document.getElementById("uploadMsg");
+
+  if (form && btn && msg) {
+    form.addEventListener("submit", () => {
+      btn.disabled = true;
+      btn.textContent = "Processing…";
+      msg.style.display = "block";
+    });
+  }
+});
+</script>
+</body>
+</html>

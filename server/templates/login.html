@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Login — Meter OCR</title>
+  <link rel="stylesheet" href="/static/app.css">
+
+  <!-- scoped styles ONLY for login -->
+  <style>
+    /* ===== Login Page (scoped) ===== */
+    body.auth-bg{
+      min-height: 100vh;
+      margin: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+
+    .login-wrap{
+      width: 100%;
+      max-width: 420px;
+    }
+
+    .login-card{
+      width: 100%;
+      border-radius: 18px;
+      padding: 26px 22px;
+      box-shadow: 0 18px 60px rgba(0,0,0,.14);
+      border: 1px solid rgba(255,255,255,.10);
+      background: rgba(255,255,255,.06);
+      backdrop-filter: blur(10px);
+    }
+
+    .login-head{
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      text-align: center;
+      gap: 10px;
+      margin-bottom: 18px;
+    }
+
+    .login-title{
+      margin: 0;
+      font-size: 26px;
+      letter-spacing: 1.2px;
+      text-transform: uppercase;
+      line-height: 1.1;
+    }
+
+    .login-sub{
+      margin: 0;
+      opacity: .75;
+      font-size: 13px;
+    }
+
+    .login-form{
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      margin-top: 14px;
+    }
+
+    .field{
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      width: 100%;
+    }
+
+    .field span{
+      font-size: 12px;
+      opacity: .85;
+    }
+
+    .input{
+      width: 100%;
+      height: 44px;
+      padding: 10px 12px;
+      border-radius: 12px;
+      border: 1px solid rgba(255,255,255,.14);
+      background: rgba(0,0,0,.18);
+      outline: none;
+      box-sizing: border-box;
+    }
+
+    .input:focus{
+      border-color: rgba(120,170,255,.75);
+      box-shadow: 0 0 0 4px rgba(120,170,255,.18);
+    }
+
+    .btn-row{
+      display: flex;
+      justify-content: center;
+      margin-top: 6px;
+    }
+
+    .btn-login{
+      height: 44px;
+      min-width: 160px;
+      padding: 0 22px;
+      border-radius: 12px;
+      border: none;
+      cursor: pointer;
+      font-weight: 700;
+    }
+
+    .toast.error{
+      margin-top: 12px;
+      margin-bottom: 6px;
+      border-radius: 12px;
+      padding: 10px 12px;
+    }
+
+    .divider{
+      margin: 18px 0;
+      opacity: .3;
+    }
+
+    .demo-creds summary{
+      cursor: pointer;
+      user-select: none;
+      font-weight: 600;
+    }
+
+    .demo-box{
+      margin-top: 10px;
+      font-size: 13px;
+      line-height: 1.7;
+      opacity: .85;
+    }
+
+    .login-foot{
+      margin-top: 14px;
+      font-size: 12px;
+      opacity: .7;
+      text-align: center;
+    }
+
+    /* Make logo centered if you use it */
+    .logo.big{
+      margin: 0 auto;
+    }
+  </style>
+</head>
+
+<body class="auth-bg">
+
+  <div class="login-wrap">
+    <div class="login-card">
+
+      <div class="login-head">
+        <div class="logo big"></div>
+        <h1 class="login-title">METER OCR</h1>
+        <p class="login-sub">Sign in to continue</p>
+      </div>
+
+      {% if error %}
+        <div class="toast error">{{ error }}</div>
+      {% endif %}
+
+      <form method="post" action="/login" class="login-form">
+
+        <label class="field">
+          <span>Username</span>
+          <input class="input" name="username" autocomplete="username" placeholder="admin / coadmin1 / user11" required>
+        </label>
+
+        <label class="field">
+          <span>Password</span>
+          <input class="input" type="password" name="password" autocomplete="current-password" placeholder="••••••••" required>
+        </label>
+
+        <div class="btn-row">
+          <button class="btn primary btn-login" type="submit">Login</button>
+        </div>
+
+      </form>
+
+      <div class="divider"></div>
+
+      <details class="demo-creds">
+        <summary>Show demo credentials</summary>
+        <div class="demo-box">
+          <b>Admin</b>: admin / <code>admin123</code><br/>
+          <b>Coadmins</b>: coadmin1..coadmin5 / <code>coadmin123</code><br/>
+          <b>Users</b>: user11..user58 / <code>user123</code>
+        </div>
+      </details>
+
+      <div class="login-foot">
+        Tip: Upload only JPG / PNG / WEBP for fastest processing.
+      </div>
+
+    </div>
+  </div>
+
+</body>
+</html>
