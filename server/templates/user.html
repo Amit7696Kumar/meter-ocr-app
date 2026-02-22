@@ -55,6 +55,9 @@
   {% if error %}
     <div class="toast error">{{ error }}</div>
   {% endif %}
+  {% if uploaded %}
+    <div class="toast ok" id="uploadToast">✅ Upload successful</div>
+  {% endif %}
 
   <!-- UPLOAD -->
   <div class="panel">

@@ -219,6 +219,14 @@ def mark_alert_read(alert_id: int):
     conn.close()
 
 
+def clear_alerts_admin():
+    conn = _conn()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM alerts WHERE target_role='admin'")
+    conn.commit()
+    conn.close()
+
+
 def count_unread_admin() -> int:
     conn = _conn()
     cur = conn.cursor()
@@ -235,3 +243,12 @@ def count_unread_coadmin(team: int) -> int:
     row = cur.fetchone()
     conn.close()
     return int(row["c"])
+
+
+def get_latest_reading_id_all() -> int:
+    conn = _conn()
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM readings ORDER BY id DESC LIMIT 1")
+    row = cur.fetchone()
+    conn.close()
+    return int(row["id"]) if row else 0

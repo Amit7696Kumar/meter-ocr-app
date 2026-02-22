@@ -264,6 +264,22 @@ async function pollAlerts() {
     }
   } catch {}
 }
+
+/** Auto refresh admin page when new readings arrive */
+async function pollLatestReading() {
+  const marker = qs("#adminAutoRefresh");
+  if (!marker) return;
+  const current = Number(marker.dataset.latestId || "0");
+  try {
+    const res = await fetch("/api/readings/admin/latest", { cache: "no-store" });
+    if (!res.ok) return;
+    const data = await res.json();
+    const latest = Number(data.latest_id || 0);
+    if (latest && latest > current) {
+      window.location.reload();
+    }
+  } catch {}
+}
 function wireModal() {
   const modal = document.getElementById("modal");
   const closeBtn = document.getElementById("modalClose");
@@ -341,5 +357,9 @@ document.addEventListener("DOMContentLoaded", () => {
   if (list) {
     pollAlerts();
     setInterval(pollAlerts, 10000);
+  }
+  const adminMarker = qs("#adminAutoRefresh");
+  if (adminMarker) {
+    setInterval(pollLatestReading, 7000);
   }
 });

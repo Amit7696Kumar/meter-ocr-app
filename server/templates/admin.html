@@ -65,6 +65,9 @@
           </div>
           <div class="topbar-actions">
             <a class="btn" href="/download/csv/admin">Download All CSV</a>
+            <form method="post" action="/alerts/clear/admin" onsubmit="return confirm('Clear all admin alerts?');">
+              <button class="btn small" type="submit">Clear All Alerts</button>
+            </form>
           </div>
         </div>
       </div>
@@ -72,6 +75,7 @@
       <div class="panel-body">
         <!-- app.js will fill this -->
         <div id="alertsLive" data-role="admin"></div>
+        <div id="adminAutoRefresh" data-latest-id="{{ latest_reading_id or 0 }}" style="display:none;"></div>
 
         <div class="small-muted" style="margin-top:10px;">
           Tip: Click “Mark Read” to clear alerts from unread count.

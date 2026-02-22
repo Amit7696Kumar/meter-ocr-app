@@ -26,11 +26,13 @@ from server.db import (
     fetch_alerts_for_admin,
     fetch_alerts_for_coadmin,
     mark_alert_read,
+    clear_alerts_admin,
     count_unread_admin,
     count_unread_coadmin,
+    get_latest_reading_id_all,
 )
 
-# ✅ use warmup + run_ocr from ocr_engine
+#  use warmup + run_ocr from ocr_engine
 from server.ocr_engine import run_ocr, warmup_models
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -61,22 +63,22 @@ templates = Jinja2Templates(directory=TEMPLATE_DIR)
 # -----------------------
 def load_ideals():
     if not os.path.exists(IDEAL_PATH):
-        print(f"[IDEALS] ⚠️ Missing {IDEAL_PATH}. Using no rules.", flush=True)
+        print(f"[IDEALS]  Missing {IDEAL_PATH}. Using no rules.", flush=True)
         return {}
 
     try:
         with open(IDEAL_PATH, "r", encoding="utf-8") as f:
             raw = f.read().strip()
             if not raw:
-                print(f"[IDEALS] ⚠️ {IDEAL_PATH} is empty. Using no rules.", flush=True)
+                print(f"[IDEALS]  {IDEAL_PATH} is empty. Using no rules.", flush=True)
                 return {}
             data = json.loads(raw)
             if not isinstance(data, dict):
-                print(f"[IDEALS] ⚠️ {IDEAL_PATH} is not a JSON object. Using no rules.", flush=True)
+                print(f"[IDEALS]  {IDEAL_PATH} is not a JSON object. Using no rules.", flush=True)
                 return {}
             return data
     except Exception as e:
-        print(f"[IDEALS] ❌ Failed to read/parse {IDEAL_PATH}: {e}", flush=True)
+        print(f"[IDEALS]  Failed to read/parse {IDEAL_PATH}: {e}", flush=True)
         return {}
 
 
@@ -113,6 +115,31 @@ def compare_against_ideal(meter_type: str, value_str: Optional[str]):
     return (False, None, None)
 
 
+def _augment_readings(readings):
+    for r in readings:
+        raw = r.get("ocr_json") if isinstance(r, dict) else None
+        if not raw:
+            r["debug_yolo"] = ""
+            r["debug_crop"] = ""
+            r["debug_prep"] = ""
+            r["ocr_obj"] = None
+            continue
+        try:
+            obj = json.loads(raw)
+        except Exception:
+            r["debug_yolo"] = ""
+            r["debug_crop"] = ""
+            r["debug_prep"] = ""
+            r["ocr_obj"] = None
+            continue
+        dbg = obj.get("debug_urls") or {}
+        r["debug_yolo"] = dbg.get("yolo", "")
+        r["debug_crop"] = dbg.get("crop", "")
+        r["debug_prep"] = dbg.get("prep", "")
+        r["ocr_obj"] = obj
+    return readings
+
+
 # -----------------------
 # Startup
 # -----------------------
@@ -122,14 +149,14 @@ import threading
 def startup():
     init_db()
 
-    # ✅ Start server immediately, warm up in background
+    #  Start server immediately, warm up in background
     def _warm():
         try:
             print("[WARMUP] Starting in background...", flush=True)
             warmup_models()
             print("[WARMUP] Done.", flush=True)
         except Exception as e:
-            print(f"[WARMUP] ⚠️ Failed: {e}", flush=True)
+            print(f"[WARMUP]  Failed: {e}", flush=True)
 
     threading.Thread(target=_warm, daemon=True).start()
 
@@ -197,10 +224,11 @@ def user_page(request: Request):
     if u["role"] == "coadmin":
         return RedirectResponse(f"/coadmin/{u['team']}", status_code=303)
 
-    my_readings = fetch_readings_by_user(int(u["id"]))
+    my_readings = _augment_readings(fetch_readings_by_user(int(u["id"])))
+    uploaded = request.query_params.get("uploaded") == "1"
     return templates.TemplateResponse(
         "user.html",
-        {"request": request, "user": u, "readings": my_readings},
+        {"request": request, "user": u, "readings": my_readings, "uploaded": uploaded},
     )
 
 
@@ -221,7 +249,7 @@ async def upload_meter_image(
             {
                 "request": request,
                 "user": u,
-                "readings": fetch_readings_by_user(int(u["id"])),
+                "readings": _augment_readings(fetch_readings_by_user(int(u["id"]))),
                 "error": "Invalid meter type",
             },
             status_code=400,
@@ -233,7 +261,7 @@ async def upload_meter_image(
             {
                 "request": request,
                 "user": u,
-                "readings": fetch_readings_by_user(int(u["id"])),
+                "readings": _augment_readings(fetch_readings_by_user(int(u["id"]))),
                 "error": "Please select an image.",
             },
             status_code=400,
@@ -246,7 +274,7 @@ async def upload_meter_image(
             {
                 "request": request,
                 "user": u,
-                "readings": fetch_readings_by_user(int(u["id"])),
+                "readings": _augment_readings(fetch_readings_by_user(int(u["id"]))),
                 "error": "Only image files are allowed.",
             },
             status_code=400,
@@ -259,18 +287,18 @@ async def upload_meter_image(
     with open(filepath, "wb") as f:
         f.write(await image.read())
 
-    # ✅ OCR in threadpool so request doesn't feel "stuck"
+    #  OCR in threadpool so request doesn't feel "stuck"
     debug_id = uuid.uuid4().hex
     try:
         ocr_result = await run_in_threadpool(run_ocr, filepath, debug_id)
     except Exception as e:
-        print(f"[OCR] ❌ Failed: {e}", flush=True)
+        print(f"[OCR]  Failed: {e}", flush=True)
         return templates.TemplateResponse(
             "user.html",
             {
                 "request": request,
                 "user": u,
-                "readings": fetch_readings_by_user(int(u["id"])),
+                "readings": _augment_readings(fetch_readings_by_user(int(u["id"]))),
                 "error": f"OCR failed: {e}",
             },
             status_code=500,
@@ -314,7 +342,7 @@ async def upload_meter_image(
             severity=severity,
         )
 
-    return RedirectResponse("/success", status_code=303)
+    return RedirectResponse("/?uploaded=1", status_code=303)
 
 
 @app.get("/success", response_class=HTMLResponse)
@@ -337,7 +365,7 @@ def coadmin_page(request: Request, team_id: int):
     if u["role"] == "coadmin" and int(u["team"]) != int(team_id):
         return HTMLResponse("Forbidden", status_code=403)
 
-    readings = fetch_readings_by_team(int(team_id))
+    readings = _augment_readings(fetch_readings_by_team(int(team_id)))
     alerts = fetch_alerts_for_coadmin(int(team_id), unread_only=False)
     unread = count_unread_coadmin(int(team_id))
 
@@ -363,9 +391,10 @@ def admin_page(request: Request):
     if not require_role(u, ["admin"]):
         return RedirectResponse("/login", status_code=303)
 
-    readings = fetch_readings_all()
+    readings = _augment_readings(fetch_readings_all())
     alerts = fetch_alerts_for_admin(unread_only=False)
     unread = count_unread_admin()
+    latest_id = get_latest_reading_id_all()
 
     return templates.TemplateResponse(
         "admin.html",
@@ -376,6 +405,7 @@ def admin_page(request: Request):
             "alerts": alerts,
             "unread_count": unread,
             "teams": [1, 2, 3, 4, 5],
+            "latest_reading_id": latest_id,
         },
     )
 
@@ -462,6 +492,14 @@ def api_alerts_admin(request: Request):
     return {"unread_count": unread, "alerts": alerts}
 
 
+@app.get("/api/readings/admin/latest")
+def api_latest_reading_admin(request: Request):
+    u = current_user(request)
+    if not require_role(u, ["admin"]):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    return {"latest_id": get_latest_reading_id_all()}
+
+
 # ✅ your JS likely calls: /api/alerts/coadmin?team=1
 @app.get("/api/alerts/coadmin")
 def api_alerts_coadmin(request: Request, team: int):
@@ -488,3 +526,12 @@ async def mark_read(request: Request, alert_id: int):
     if u["role"] == "admin":
         return RedirectResponse("/admin", status_code=303)
     return RedirectResponse(f"/coadmin/{u['team']}", status_code=303)
+
+
+@app.post("/alerts/clear/admin")
+async def clear_admin_alerts(request: Request):
+    u = current_user(request)
+    if not require_role(u, ["admin"]):
+        return RedirectResponse("/login", status_code=303)
+    clear_alerts_admin()
+    return RedirectResponse("/admin", status_code=303)
