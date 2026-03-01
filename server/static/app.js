@@ -265,18 +265,31 @@ async function pollAlerts() {
   } catch {}
 }
 
-/** Auto refresh admin page when new readings arrive */
-async function pollLatestReading() {
-  const marker = qs("#adminAutoRefresh");
-  if (!marker) return;
-  const current = Number(marker.dataset.latestId || "0");
+async function pollLatestReadings() {
+  const adminRef = qs("#adminAutoRefresh");
+  const coadminRef = qs("#coadminAutoRefresh");
+  let url = null;
+  let ref = null;
+
+  if (adminRef) {
+    ref = adminRef;
+    url = "/api/readings/admin/latest";
+  } else if (coadminRef) {
+    ref = coadminRef;
+    const team = coadminRef.dataset.team || "";
+    url = `/api/readings/coadmin/latest?team=${encodeURIComponent(team)}`;
+  }
+  if (!url || !ref) return;
+
   try {
-    const res = await fetch("/api/readings/admin/latest", { cache: "no-store" });
+    const res = await fetch(url, { cache: "no-store" });
     if (!res.ok) return;
     const data = await res.json();
+    const current = Number(ref.dataset.latestId || "0");
     const latest = Number(data.latest_id || 0);
-    if (latest && latest > current) {
+    if (latest > current) {
       window.location.reload();
+      return;
     }
   } catch {}
 }
@@ -301,7 +314,7 @@ function wireModal() {
     if (e.target === modal) closeModal();
   });
 
-  // ✅ Click VALUE -> opens debug + JSON
+  //  Click VALUE -> opens debug + JSON
   document.querySelectorAll(".js-open-reading").forEach(btn => {
     btn.addEventListener("click", () => {
       const tr = btn.closest("tr");
@@ -333,7 +346,7 @@ function wireModal() {
     });
   });
 
-  // ✅ Click IMAGE -> opens uploaded image in SAME modal (not new tab)
+  //  Click IMAGE -> opens uploaded image in SAME modal (not new tab)
   document.querySelectorAll(".js-open-image").forEach(btn => {
     btn.addEventListener("click", () => {
       const src = btn.getAttribute("data-src");
@@ -358,8 +371,6 @@ document.addEventListener("DOMContentLoaded", () => {
     pollAlerts();
     setInterval(pollAlerts, 10000);
   }
-  const adminMarker = qs("#adminAutoRefresh");
-  if (adminMarker) {
-    setInterval(pollLatestReading, 7000);
-  }
+  pollLatestReadings();
+  setInterval(pollLatestReadings, 5000);
 });

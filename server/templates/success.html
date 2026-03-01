@@ -4,132 +4,26 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Upload Successful</title>
-
   <meta name="description" content="File uploaded successfully." />
-
-  <style>
-    :root {
-      --bg: #f8fafc;
-      --card-bg: #ffffff;
-      --border: #e5e7eb;
-      --primary: #2563eb;
-      --success: #16a34a;
-      --text: #111827;
-      --muted: #6b7280;
-      --radius: 12px;
-    }
-
-    * {
-      box-sizing: border-box;
-    }
-
-    body {
-      margin: 0;
-      min-height: 100vh;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
-                   Roboto, Ubuntu, Cantarell, "Helvetica Neue", Arial, sans-serif;
-      background-color: var(--bg);
-      color: var(--text);
-    }
-
-    main {
-      width: 100%;
-      max-width: 420px;
-      padding: 16px;
-    }
-
-    .card {
-      background: var(--card-bg);
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      padding: 24px;
-      text-align: center;
-      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.05);
-    }
-
-    .icon {
-      font-size: 48px;
-      margin-bottom: 12px;
-      color: var(--success);
-    }
-
-    h1 {
-      font-size: 1.4rem;
-      margin: 0 0 8px;
-    }
-
-    p {
-      margin: 0 0 20px;
-      color: var(--muted);
-      font-size: 0.95rem;
-    }
-
-    .actions {
-      display: flex;
-      gap: 12px;
-      justify-content: center;
-      flex-wrap: wrap;
-    }
-
-    a.button {
-      display: inline-block;
-      padding: 10px 16px;
-      border-radius: 8px;
-      text-decoration: none;
-      font-weight: 500;
-      font-size: 0.95rem;
-      border: 1px solid transparent;
-      transition: background-color 0.15s ease, border-color 0.15s ease;
-    }
-
-    a.primary {
-      background-color: var(--primary);
-      color: #ffffff;
-    }
-
-    a.primary:hover {
-      background-color: #1e40af;
-    }
-
-    a.secondary {
-      background-color: #ffffff;
-      color: var(--text);
-      border-color: var(--border);
-    }
-
-    a.secondary:hover {
-      background-color: #f3f4f6;
-    }
-
-    footer {
-      margin-top: 16px;
-      text-align: center;
-      font-size: 0.8rem;
-      color: var(--muted);
-    }
-  </style>
+  <link rel="stylesheet" href="/static/app.css?v={{ static_version }}">
 </head>
 
-<body>
-  <main role="main">
-    <section class="card" aria-live="polite">
-      <div class="icon" aria-hidden="true">✅</div>
+<body class="auth-bg">
+  <main role="main" class="auth-wrap">
+    <section class="auth-card" aria-live="polite">
+      <div class="auth-head">
+        <div class="logo big"></div>
+        <div>
+          <h1>Upload Successful</h1>
+          <div class="small-muted">Meter image uploaded and processed.</div>
+        </div>
+      </div>
 
-      <h1>Upload Successful</h1>
-      <p>Your file has been uploaded and processed successfully.</p>
-
-      <div class="actions">
-        <a href="/" class="button primary">Back to Home</a>
-        <a href="/logout" class="button secondary">Logout</a>
+      <div class="filters" style="margin-top:12px;">
+        <a href="/" class="btn primary">Back to Home</a>
+        <a href="/logout" class="btn">Logout</a>
       </div>
     </section>
-
-    <footer>
-      &copy; 2026 Meter OCR App
-    </footer>
   </main>
 </body>
 </html>

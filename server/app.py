@@ -1,6 +1,8 @@
 import os
 import json
 import uuid
+import time
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -11,7 +13,8 @@ from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.concurrency import run_in_threadpool
 
-from passlib.hash import bcrypt
+import bcrypt as pybcrypt
+from passlib.hash import pbkdf2_sha256
 
 from server.db import (
     init_db,
@@ -30,6 +33,12 @@ from server.db import (
     count_unread_admin,
     count_unread_coadmin,
     get_latest_reading_id_all,
+    get_latest_reading_id_team,
+    create_message,
+    fetch_messages_for_user,
+    mark_message_read,
+    fetch_users_all,
+    fetch_users_by_team,
 )
 
 #  use warmup + run_ocr from ocr_engine
@@ -50,12 +59,19 @@ DEBUG_DIR.mkdir(parents=True, exist_ok=True)
 app = FastAPI(title="Meter OCR (YOLO + EasyOCR)")
 
 # Session cookies
-app.add_middleware(SessionMiddleware, secret_key="CHANGE_ME_TO_A_RANDOM_LONG_SECRET")
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=os.getenv("SESSION_SECRET_KEY", "CHANGE_ME_TO_A_RANDOM_LONG_SECRET"),
+    max_age=60 * 60 * 24 * 365 * 10,  # 10 years; logout clears it explicitly
+    same_site="lax",
+    https_only=False,
+)
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
 
 templates = Jinja2Templates(directory=TEMPLATE_DIR)
+templates.env.globals["static_version"] = str(int(time.time()))
 
 
 # -----------------------
@@ -115,6 +131,25 @@ def compare_against_ideal(meter_type: str, value_str: Optional[str]):
     return (False, None, None)
 
 
+def hash_password(password: str) -> str:
+    # Use PBKDF2 to avoid passlib<->bcrypt backend compatibility issues.
+    return pbkdf2_sha256.hash(password)
+
+
+def verify_password(password: str, stored_hash: str) -> bool:
+    if not stored_hash:
+        return False
+    if stored_hash.startswith("$2"):
+        try:
+            return pybcrypt.checkpw(password.encode("utf-8"), stored_hash.encode("utf-8"))
+        except Exception:
+            return False
+    try:
+        return pbkdf2_sha256.verify(password, stored_hash)
+    except Exception:
+        return False
+
+
 def _augment_readings(readings):
     for r in readings:
         raw = r.get("ocr_json") if isinstance(r, dict) else None
@@ -140,6 +175,16 @@ def _augment_readings(readings):
     return readings
 
 
+def _filter_today_readings(readings):
+    today = datetime.now().strftime("%Y-%m-%d")
+    out = []
+    for r in readings:
+        created = (r.get("created_at") if isinstance(r, dict) else None) or ""
+        if str(created).startswith(today):
+            out.append(r)
+    return out
+
+
 # -----------------------
 # Startup
 # -----------------------
@@ -162,18 +207,18 @@ def startup():
 
     # create users...
     if not get_user_by_username("admin"):
-        create_user("admin", bcrypt.hash("admin123"), "admin", None)
+        create_user("admin", hash_password("admin123"), "admin", None)
 
     for t in range(1, 6):
         uname = f"coadmin{t}"
         if not get_user_by_username(uname):
-            create_user(uname, bcrypt.hash("coadmin123"), "coadmin", t)
+            create_user(uname, hash_password("coadmin123"), "coadmin", t)
 
     for t in range(1, 6):
         for i in range(1, 9):
             uname = f"user{t}{i}"
             if not get_user_by_username(uname):
-                create_user(uname, bcrypt.hash("user123"), "user", t)
+                create_user(uname, hash_password("user123"), "user", t)
 
     print("[STARTUP] App ready. Visit http://127.0.0.1:8000/login", flush=True)
 
@@ -189,7 +234,7 @@ def login_page(request: Request):
 @app.post("/login")
 async def do_login(request: Request, username: str = Form(...), password: str = Form(...)):
     u = get_user_by_username(username.strip())
-    if not u or not bcrypt.verify(password, u["password_hash"]):
+    if not u or not verify_password(password, u["password_hash"]):
         return templates.TemplateResponse(
             "login.html", {"request": request, "error": "Invalid credentials"}, status_code=401
         )
@@ -224,11 +269,12 @@ def user_page(request: Request):
     if u["role"] == "coadmin":
         return RedirectResponse(f"/coadmin/{u['team']}", status_code=303)
 
-    my_readings = _augment_readings(fetch_readings_by_user(int(u["id"])))
+    my_readings = _augment_readings(_filter_today_readings(fetch_readings_by_user(int(u["id"]))))
     uploaded = request.query_params.get("uploaded") == "1"
+    messages = fetch_messages_for_user(role=u["role"], user_id=int(u["id"]), team=int(u["team"]))
     return templates.TemplateResponse(
         "user.html",
-        {"request": request, "user": u, "readings": my_readings, "uploaded": uploaded},
+        {"request": request, "user": u, "readings": my_readings, "uploaded": uploaded, "messages": messages},
     )
 
 
@@ -237,19 +283,20 @@ async def upload_meter_image(
     request: Request,
     label: str = Form(...),
     meter_type: str = Form(...),
+    manual_value: Optional[str] = Form(None),
     image: UploadFile = File(...),
 ):
     u = current_user(request)
     if not require_role(u, ["user"]):
         return RedirectResponse("/login", status_code=303)
 
-    if meter_type not in ["earthing", "temp"]:
+    if meter_type not in ["earthing", "temp", "voltage"]:
         return templates.TemplateResponse(
             "user.html",
             {
                 "request": request,
                 "user": u,
-                "readings": _augment_readings(fetch_readings_by_user(int(u["id"]))),
+                "readings": _augment_readings(_filter_today_readings(fetch_readings_by_user(int(u["id"])))),
                 "error": "Invalid meter type",
             },
             status_code=400,
@@ -261,7 +308,7 @@ async def upload_meter_image(
             {
                 "request": request,
                 "user": u,
-                "readings": _augment_readings(fetch_readings_by_user(int(u["id"]))),
+                "readings": _augment_readings(_filter_today_readings(fetch_readings_by_user(int(u["id"])))),
                 "error": "Please select an image.",
             },
             status_code=400,
@@ -274,7 +321,7 @@ async def upload_meter_image(
             {
                 "request": request,
                 "user": u,
-                "readings": _augment_readings(fetch_readings_by_user(int(u["id"]))),
+                "readings": _augment_readings(_filter_today_readings(fetch_readings_by_user(int(u["id"])))),
                 "error": "Only image files are allowed.",
             },
             status_code=400,
@@ -290,7 +337,7 @@ async def upload_meter_image(
     #  OCR in threadpool so request doesn't feel "stuck"
     debug_id = uuid.uuid4().hex
     try:
-        ocr_result = await run_in_threadpool(run_ocr, filepath, debug_id)
+        ocr_result = await run_in_threadpool(run_ocr, filepath, debug_id, meter_type)
     except Exception as e:
         print(f"[OCR]  Failed: {e}", flush=True)
         return templates.TemplateResponse(
@@ -298,7 +345,7 @@ async def upload_meter_image(
             {
                 "request": request,
                 "user": u,
-                "readings": _augment_readings(fetch_readings_by_user(int(u["id"]))),
+                "readings": _augment_readings(_filter_today_readings(fetch_readings_by_user(int(u["id"])))),
                 "error": f"OCR failed: {e}",
             },
             status_code=500,
@@ -308,20 +355,24 @@ async def upload_meter_image(
     if ocr_result.get("numeric"):
         numeric_value = ocr_result["numeric"].get("value")
 
+    manual_value = (manual_value or "").strip() or None
+    value_for_alert = manual_value or numeric_value
+
     # Store reading
     rid = insert_reading(
         user_id=int(u["id"]),
         team=int(u["team"]),
         meter_type=meter_type,
         label=label.strip(),
-        value=numeric_value,
+        value=manual_value or numeric_value,
         filename=filename,
         ocr_json=json.dumps(ocr_result, default=str),
+        manual_value=manual_value,
     )
 
     # Alerts logic
-    print(f"[ALERT] meter_type={meter_type} numeric_value={numeric_value}", flush=True)
-    is_alert, severity, msg = compare_against_ideal(meter_type, numeric_value)
+    print(f"[ALERT] meter_type={meter_type} numeric_value={value_for_alert}", flush=True)
+    is_alert, severity, msg = compare_against_ideal(meter_type, value_for_alert)
     print(f"[ALERT] is_alert={is_alert} severity={severity} msg={msg}", flush=True)
 
     if numeric_value and is_alert:
@@ -365,10 +416,13 @@ def coadmin_page(request: Request, team_id: int):
     if u["role"] == "coadmin" and int(u["team"]) != int(team_id):
         return HTMLResponse("Forbidden", status_code=403)
 
-    readings = _augment_readings(fetch_readings_by_team(int(team_id)))
+    readings = _augment_readings(_filter_today_readings(fetch_readings_by_team(int(team_id))))
     alerts = fetch_alerts_for_coadmin(int(team_id), unread_only=False)
     unread = count_unread_coadmin(int(team_id))
+    latest_id = get_latest_reading_id_team(int(team_id))
 
+    messages = fetch_messages_for_user(role=u["role"], user_id=int(u["id"]), team=int(u["team"]))
+    users_team = fetch_users_by_team(int(team_id))
     return templates.TemplateResponse(
         "coadmin.html",
         {
@@ -378,6 +432,9 @@ def coadmin_page(request: Request, team_id: int):
             "readings": readings,
             "alerts": alerts,
             "unread_count": unread,
+            "latest_reading_id": latest_id,
+            "messages": messages,
+            "users_team": users_team,
         },
     )
 
@@ -391,11 +448,13 @@ def admin_page(request: Request):
     if not require_role(u, ["admin"]):
         return RedirectResponse("/login", status_code=303)
 
-    readings = _augment_readings(fetch_readings_all())
+    readings = _augment_readings(_filter_today_readings(fetch_readings_all()))
     alerts = fetch_alerts_for_admin(unread_only=False)
     unread = count_unread_admin()
     latest_id = get_latest_reading_id_all()
 
+    messages = fetch_messages_for_user(role=u["role"], user_id=int(u["id"]), team=None)
+    all_users = fetch_users_all()
     return templates.TemplateResponse(
         "admin.html",
         {
@@ -406,6 +465,8 @@ def admin_page(request: Request):
             "unread_count": unread,
             "teams": [1, 2, 3, 4, 5],
             "latest_reading_id": latest_id,
+            "messages": messages,
+            "all_users": all_users,
         },
     )
 
@@ -500,6 +561,16 @@ def api_latest_reading_admin(request: Request):
     return {"latest_id": get_latest_reading_id_all()}
 
 
+@app.get("/api/readings/coadmin/latest")
+def api_latest_reading_coadmin(request: Request, team: int):
+    u = current_user(request)
+    if not require_role(u, ["coadmin", "admin"]):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    if u["role"] == "coadmin" and int(u["team"]) != int(team):
+        return JSONResponse({"error": "forbidden"}, status_code=403)
+    return {"latest_id": get_latest_reading_id_team(int(team))}
+
+
 # ✅ your JS likely calls: /api/alerts/coadmin?team=1
 @app.get("/api/alerts/coadmin")
 def api_alerts_coadmin(request: Request, team: int):
@@ -535,3 +606,76 @@ async def clear_admin_alerts(request: Request):
         return RedirectResponse("/login", status_code=303)
     clear_alerts_admin()
     return RedirectResponse("/admin", status_code=303)
+
+
+@app.post("/messages/send")
+async def send_message(
+    request: Request,
+    target_role: str = Form(...),
+    target_team: Optional[str] = Form(None),
+    target_username: Optional[str] = Form(None),
+    body: str = Form(...),
+):
+    u = current_user(request)
+    if not require_role(u, ["user", "coadmin", "admin"]):
+        return RedirectResponse("/login", status_code=303)
+
+    target_role = target_role.strip().lower()
+    if target_role not in ["user", "coadmin", "admin"]:
+        return RedirectResponse("/", status_code=303)
+
+    target_user_id = None
+    if target_username:
+        user_obj = get_user_by_username(target_username.strip())
+        if user_obj:
+            target_user_id = int(user_obj["id"])
+            target_team = user_obj.get("team")
+
+    # Role-based restrictions
+    if u["role"] == "user" and target_role not in ["coadmin", "admin"]:
+        return RedirectResponse("/", status_code=303)
+    if u["role"] == "coadmin":
+        if target_role == "user":
+            # restrict to same team unless explicit user
+            if target_team is None:
+                target_team = int(u["team"])
+            if int(target_team) != int(u["team"]):
+                return RedirectResponse(f"/coadmin/{u['team']}", status_code=303)
+        elif target_role != "admin":
+            return RedirectResponse(f"/coadmin/{u['team']}", status_code=303)
+
+    team_val = None
+    if target_team is not None and str(target_team).strip() != "":
+        try:
+            team_val = int(target_team)
+        except Exception:
+            team_val = None
+
+    create_message(
+        sender_user_id=int(u["id"]),
+        sender_role=u["role"],
+        sender_team=int(u["team"]) if u.get("team") is not None else None,
+        target_role=target_role,
+        target_team=team_val,
+        target_user_id=target_user_id,
+        body=body.strip(),
+    )
+
+    if u["role"] == "admin":
+        return RedirectResponse("/admin", status_code=303)
+    if u["role"] == "coadmin":
+        return RedirectResponse(f"/coadmin/{u['team']}", status_code=303)
+    return RedirectResponse("/", status_code=303)
+
+
+@app.post("/messages/{message_id}/read")
+async def mark_message_as_read(request: Request, message_id: int):
+    u = current_user(request)
+    if not require_role(u, ["user", "coadmin", "admin"]):
+        return RedirectResponse("/login", status_code=303)
+    mark_message_read(int(message_id))
+    if u["role"] == "admin":
+        return RedirectResponse("/admin", status_code=303)
+    if u["role"] == "coadmin":
+        return RedirectResponse(f"/coadmin/{u['team']}", status_code=303)
+    return RedirectResponse("/", status_code=303)

@@ -37,12 +37,18 @@ def init_db():
         meter_type TEXT NOT NULL,        -- 'earthing' or 'temp'
         label TEXT NOT NULL,             -- user label / site name etc
         value TEXT,                      -- numeric as text (to preserve '0.40')
+        manual_value TEXT,               -- optional user-entered reading
         filename TEXT NOT NULL,
         ocr_json TEXT,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY(user_id) REFERENCES users(id)
     )
     """)
+    # Add missing columns for existing DBs
+    cur.execute("PRAGMA table_info(readings)")
+    cols = {row[1] for row in cur.fetchall()}
+    if "manual_value" not in cols:
+        cur.execute("ALTER TABLE readings ADD COLUMN manual_value TEXT")
 
     # Alerts for coadmin/admin
     cur.execute("""
@@ -56,6 +62,24 @@ def init_db():
         is_read INTEGER NOT NULL DEFAULT 0,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY(reading_id) REFERENCES readings(id)
+    )
+    """)
+
+    # Messages between roles/users
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        sender_user_id INTEGER,
+        sender_role TEXT NOT NULL CHECK(sender_role IN ('user', 'coadmin', 'admin')),
+        sender_team INTEGER,
+        target_role TEXT NOT NULL CHECK(target_role IN ('user', 'coadmin', 'admin')),
+        target_team INTEGER,
+        target_user_id INTEGER,
+        body TEXT NOT NULL,
+        is_read INTEGER NOT NULL DEFAULT 0,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY(sender_user_id) REFERENCES users(id),
+        FOREIGN KEY(target_user_id) REFERENCES users(id)
     )
     """)
 
@@ -95,18 +119,36 @@ def get_user_by_id(user_id: int) -> Optional[Dict[str, Any]]:
     return dict(row) if row else None
 
 
+def fetch_users_all() -> List[Dict[str, Any]]:
+    conn = _conn()
+    cur = conn.cursor()
+    cur.execute("SELECT id, username, role, team FROM users ORDER BY username ASC")
+    rows = cur.fetchall()
+    conn.close()
+    return [dict(x) for x in rows]
+
+
+def fetch_users_by_team(team: int) -> List[Dict[str, Any]]:
+    conn = _conn()
+    cur = conn.cursor()
+    cur.execute("SELECT id, username, role, team FROM users WHERE team=? ORDER BY username ASC", (team,))
+    rows = cur.fetchall()
+    conn.close()
+    return [dict(x) for x in rows]
+
+
 # -----------------------------
 # Readings
 # -----------------------------
-def insert_reading(*, user_id: int, team: int, meter_type: str, label: str, value: Optional[str], filename: str, ocr_json: str) -> int:
+def insert_reading(*, user_id: int, team: int, meter_type: str, label: str, value: Optional[str], filename: str, ocr_json: str, manual_value: Optional[str] = None) -> int:
     conn = _conn()
     cur = conn.cursor()
     cur.execute(
         """
-        INSERT INTO readings(user_id, team, meter_type, label, value, filename, ocr_json)
-        VALUES(?,?,?,?,?,?,?)
+        INSERT INTO readings(user_id, team, meter_type, label, value, manual_value, filename, ocr_json)
+        VALUES(?,?,?,?,?,?,?,?)
         """,
-        (user_id, team, meter_type, label, value, filename, ocr_json),
+        (user_id, team, meter_type, label, value, manual_value, filename, ocr_json),
     )
     rid = cur.lastrowid
     conn.commit()
@@ -227,6 +269,72 @@ def clear_alerts_admin():
     conn.close()
 
 
+# -----------------------------
+# Messages
+# -----------------------------
+def create_message(
+    *,
+    sender_user_id: Optional[int],
+    sender_role: str,
+    sender_team: Optional[int],
+    target_role: str,
+    target_team: Optional[int],
+    target_user_id: Optional[int],
+    body: str,
+):
+    conn = _conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO messages(sender_user_id, sender_role, sender_team, target_role, target_team, target_user_id, body)
+        VALUES(?,?,?,?,?,?,?)
+        """,
+        (sender_user_id, sender_role, sender_team, target_role, target_team, target_user_id, body),
+    )
+    conn.commit()
+    conn.close()
+
+
+def fetch_messages_for_user(*, role: str, user_id: int, team: Optional[int]) -> List[Dict[str, Any]]:
+    conn = _conn()
+    cur = conn.cursor()
+    if role == "admin":
+        cur.execute("""
+            SELECT m.*, u.username AS sender_username
+            FROM messages m
+            LEFT JOIN users u ON u.id = m.sender_user_id
+            WHERE m.target_role='admin'
+            ORDER BY m.created_at DESC
+        """)
+    elif role == "coadmin":
+        cur.execute("""
+            SELECT m.*, u.username AS sender_username
+            FROM messages m
+            LEFT JOIN users u ON u.id = m.sender_user_id
+            WHERE m.target_role='coadmin' AND (m.target_team=? OR m.target_user_id=?)
+            ORDER BY m.created_at DESC
+        """, (team, user_id))
+    else:
+        cur.execute("""
+            SELECT m.*, u.username AS sender_username
+            FROM messages m
+            LEFT JOIN users u ON u.id = m.sender_user_id
+            WHERE m.target_role='user' AND (m.target_user_id=? OR m.target_team=?)
+            ORDER BY m.created_at DESC
+        """, (user_id, team))
+    rows = cur.fetchall()
+    conn.close()
+    return [dict(x) for x in rows]
+
+
+def mark_message_read(message_id: int):
+    conn = _conn()
+    cur = conn.cursor()
+    cur.execute("UPDATE messages SET is_read=1 WHERE id=?", (message_id,))
+    conn.commit()
+    conn.close()
+
+
 def count_unread_admin() -> int:
     conn = _conn()
     cur = conn.cursor()
@@ -249,6 +357,15 @@ def get_latest_reading_id_all() -> int:
     conn = _conn()
     cur = conn.cursor()
     cur.execute("SELECT id FROM readings ORDER BY id DESC LIMIT 1")
+    row = cur.fetchone()
+    conn.close()
+    return int(row["id"]) if row else 0
+
+
+def get_latest_reading_id_team(team: int) -> int:
+    conn = _conn()
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM readings WHERE team=? ORDER BY id DESC LIMIT 1", (team,))
     row = cur.fetchone()
     conn.close()
     return int(row["id"]) if row else 0

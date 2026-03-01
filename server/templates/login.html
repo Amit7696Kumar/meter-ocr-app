@@ -4,11 +4,10 @@
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
   <title>Login — Meter OCR</title>
-  <link rel="stylesheet" href="/static/app.css">
+  <link rel="stylesheet" href="/static/app.css?v={{ static_version }}">
 
   <!-- scoped styles ONLY for login -->
   <style>
-    /* ===== Login Page (scoped) ===== */
     body.auth-bg{
       min-height: 100vh;
       margin: 0;
@@ -18,19 +17,15 @@
       padding: 24px;
     }
 
-    .login-wrap{
-      width: 100%;
-      max-width: 420px;
-    }
+    .login-wrap{ width: 100%; max-width: 440px; }
 
     .login-card{
       width: 100%;
-      border-radius: 18px;
-      padding: 26px 22px;
-      box-shadow: 0 18px 60px rgba(0,0,0,.14);
-      border: 1px solid rgba(255,255,255,.10);
-      background: rgba(255,255,255,.06);
-      backdrop-filter: blur(10px);
+      border-radius: 16px;
+      padding: 22px 20px;
+      border: 1px solid var(--line);
+      background: var(--panel);
+      box-shadow: var(--shadow);
     }
 
     .login-head{
@@ -38,29 +33,30 @@
       flex-direction: column;
       align-items: center;
       text-align: center;
-      gap: 10px;
-      margin-bottom: 18px;
+      gap: 8px;
+      margin-bottom: 16px;
     }
 
     .login-title{
       margin: 0;
-      font-size: 26px;
-      letter-spacing: 1.2px;
+      font-size: 22px;
+      letter-spacing: .8px;
       text-transform: uppercase;
       line-height: 1.1;
+      color: var(--text);
     }
 
     .login-sub{
       margin: 0;
-      opacity: .75;
-      font-size: 13px;
+      color: var(--muted);
+      font-size: 12px;
     }
 
     .login-form{
       display: flex;
       flex-direction: column;
-      gap: 14px;
-      margin-top: 14px;
+      gap: 12px;
+      margin-top: 12px;
     }
 
     .field{
@@ -72,23 +68,25 @@
 
     .field span{
       font-size: 12px;
-      opacity: .85;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: .4px;
     }
 
     .input{
       width: 100%;
       height: 44px;
       padding: 10px 12px;
-      border-radius: 12px;
-      border: 1px solid rgba(255,255,255,.14);
-      background: rgba(0,0,0,.18);
+      border-radius: 10px;
+      border: 1px solid var(--line);
+      background: #fff;
       outline: none;
       box-sizing: border-box;
     }
 
     .input:focus{
-      border-color: rgba(120,170,255,.75);
-      box-shadow: 0 0 0 4px rgba(120,170,255,.18);
+      border-color: #8aa07a;
+      box-shadow: 0 0 0 3px rgba(120,160,110,.18);
     }
 
     .btn-row{
@@ -101,10 +99,13 @@
       height: 44px;
       min-width: 160px;
       padding: 0 22px;
-      border-radius: 12px;
-      border: none;
+      border-radius: 10px;
+      border: 1px solid var(--line);
       cursor: pointer;
       font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: .4px;
+      background: linear-gradient(135deg, #dfe5d6, #f7f3e7);
     }
 
     .toast.error{
@@ -115,33 +116,28 @@
     }
 
     .divider{
-      margin: 18px 0;
-      opacity: .3;
+      margin: 16px 0;
+      opacity: .4;
     }
 
     .demo-creds summary{
       cursor: pointer;
       user-select: none;
-      font-weight: 600;
+      font-weight: 700;
     }
 
     .demo-box{
       margin-top: 10px;
-      font-size: 13px;
+      font-size: 12px;
       line-height: 1.7;
-      opacity: .85;
+      color: var(--muted);
     }
 
     .login-foot{
       margin-top: 14px;
       font-size: 12px;
-      opacity: .7;
+      color: var(--muted);
       text-align: center;
-    }
-
-    /* Make logo centered if you use it */
-    .logo.big{
-      margin: 0 auto;
     }
   </style>
 </head>

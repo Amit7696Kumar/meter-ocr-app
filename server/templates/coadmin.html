@@ -16,7 +16,7 @@
     Coadmin — {{ team_names.get(team_id, "Team " ~ team_id) }}
   </title>
 
-  <link rel="stylesheet" href="/static/app.css">
+  <link rel="stylesheet" href="/static/app.css?v={{ static_version }}">
   <script src="/static/app.js"></script>
 </head>
 
@@ -32,7 +32,7 @@
     <div class="badges">
       <div class="badge">Role: <strong>{{ user.role }}</strong></div>
       <div class="badge">Team: <strong>{{ team_id }}</strong></div>
-      <div class="badge">Unread Alerts: <strong>{{ unread_count }}</strong></div>
+      <div class="badge">Unread Alerts: <strong id="unreadBadge">{{ unread_count }}</strong></div>
       <a class="btn" href="/logout">Logout</a>
     </div>
   </div>
@@ -55,11 +55,12 @@
     </div>
   </div>
 
-  <div class="panel">
-    <div class="tabs">
-      <div class="tab active" data-tab="readings">Readings</div>
-      <div class="tab" data-tab="alerts">Alerts</div>
-    </div>
+    <div class="panel">
+      <div class="tabs">
+        <div class="tab active" data-tab="readings">Readings</div>
+        <div class="tab" data-tab="alerts">Alerts</div>
+        <div class="tab" data-tab="messages">Messages</div>
+      </div>
 
     <!-- READINGS -->
     <div class="tab-content active" data-tab-content="readings">
@@ -145,30 +146,82 @@
 
     <!-- ALERTS -->
     <div class="tab-content" data-tab-content="alerts">
-      {% if alerts and alerts|length > 0 %}
-        {% for a in alerts %}
-          <div class="toast {% if a.severity == 'high' %}error{% elif a.severity == 'low' %}error{% else %}ok{% endif %}">
+      <div id="alertsLive" data-role="coadmin" data-team="{{ team_id }}">
+        {% if alerts and alerts|length > 0 %}
+          {% for a in alerts %}
+            <div class="toast {% if a.severity == 'high' %}error{% elif a.severity == 'low' %}error{% else %}ok{% endif %}">
+              <div style="display:flex; justify-content:space-between; gap:10px; align-items:flex-start;">
+                <div>
+                  <div>
+                    <span class="pill {% if a.severity == 'high' %}high{% elif a.severity == 'low' %}low{% else %}ok{% endif %}">
+                      {{ a.severity|upper }}
+                    </span>
+                    <span style="margin-left:8px; font-weight:800;">{{ a.message }}</span>
+                  </div>
+                  <div class="small-muted">Created: {{ a.created_at }} • {% if a.is_read %}Read{% else %}Unread{% endif %}</div>
+                </div>
+                {% if not a.is_read %}
+                <form method="post" action="/alerts/{{ a.id }}/read">
+                  <button class="btn small" type="submit">Mark Read</button>
+                </form>
+                {% endif %}
+              </div>
+            </div>
+          {% endfor %}
+        {% else %}
+          <div class="small-muted">No alerts for this team yet.</div>
+        {% endif %}
+      </div>
+      <div id="coadminAutoRefresh" data-team="{{ team_id }}" data-latest-id="{{ latest_reading_id or 0 }}" style="display:none;"></div>
+    </div>
+
+    <!-- MESSAGES -->
+    <div class="tab-content" data-tab-content="messages">
+      <form method="post" action="/messages/send" class="stack" style="margin-bottom:12px;">
+        <div class="filters">
+          <select class="input" name="target_role" required>
+            <option value="admin">Admin</option>
+            <option value="user">User</option>
+          </select>
+          <select class="input" name="target_username">
+            <option value="">Select user (optional)</option>
+            {% if users_team %}
+              {% for u in users_team %}
+                {% if u.role == 'user' %}
+                  <option value="{{ u.username }}">{{ u.username }}</option>
+                {% endif %}
+              {% endfor %}
+            {% endif %}
+          </select>
+        </div>
+        <input class="input" name="body" placeholder="Write a message…" required />
+        <button class="btn primary" type="submit">Send Message</button>
+      </form>
+
+      {% if messages and messages|length > 0 %}
+        {% for m in messages %}
+          <div class="toast {% if m.is_read %}ok{% else %}error{% endif %}">
             <div style="display:flex; justify-content:space-between; gap:10px; align-items:flex-start;">
               <div>
-                <div>
-                  <span class="pill {% if a.severity == 'high' %}high{% elif a.severity == 'low' %}low{% else %}ok{% endif %}">
-                    {{ a.severity|upper }}
-                  </span>
-                  <span style="margin-left:8px; font-weight:800;">{{ a.message }}</span>
+                <div style="font-weight:800;">
+                  From {{ m.sender_role|upper }}{% if m.sender_username %} ({{ m.sender_username }}){% endif %}
                 </div>
-                <div class="small-muted">Created: {{ a.created_at }} • {% if a.is_read %}Read{% else %}Unread{% endif %}</div>
+                <div class="small-muted">
+                  To {{ m.target_role|upper }}{% if m.target_user_id %} (User ID {{ m.target_user_id }}){% elif m.target_team %} (Team {{ m.target_team }}){% endif %}
+                </div>
+                <div>{{ m.body }}</div>
+                <div class="small-muted">Created: {{ m.created_at }} • {% if m.is_read %}Read{% else %}Unread{% endif %}</div>
               </div>
-
-              {% if not a.is_read %}
-              <form method="post" action="/alerts/{{ a.id }}/read">
-                <button class="btn small" type="submit">Mark Read</button>
-              </form>
+              {% if not m.is_read %}
+                <form method="post" action="/messages/{{ m.id }}/read">
+                  <button class="btn small" type="submit">Mark Read</button>
+                </form>
               {% endif %}
             </div>
           </div>
         {% endfor %}
       {% else %}
-        <div class="small-muted">No alerts for this team yet.</div>
+        <div class="small-muted">No messages yet.</div>
       {% endif %}
     </div>
 

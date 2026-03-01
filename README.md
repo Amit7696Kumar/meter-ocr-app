@@ -1,8 +1,8 @@
-# Meter OCR (PaddleOCR) - End User → Server → Admin
+# Meter OCR - End User -> Server -> Admin
 
 ## What it does
 - User page: upload meter image
-- Server: runs PaddleOCR
+- Server: runs OCR on uploaded meter images
 - Admin page: shows extracted text + uploaded image + raw OCR JSON
 
 ## Prerequisites
@@ -16,22 +16,22 @@
    python3 -m venv .venv
    source .venv/bin/activate
 
-3) Install FastAPI + PaddleOCR dependencies:
+3) Install backend dependencies:
 
    pip install -r server/requirements.txt
 
-4) Install PaddlePaddle (Apple Silicon)
-   PaddleOCR requires paddlepaddle.
-   On macOS M1, you must install an Apple Silicon-compatible paddlepaddle wheel.
-
-   ✅ Recommended approach:
-   - Follow PaddlePaddle official install instructions for macOS (ARM64)
-   - Then run:
-     pip install paddlepaddle
-
-5) Run the server:
+4) Run the server:
 
    uvicorn server.app:app --reload --host 0.0.0.0 --port 8000
+
+## Google Cloud Vision OCR (for uploaded images)
+- Install deps: `pip install -r server/requirements.txt`
+- Configure Google Vision API key:
+  - `export GCV_API_KEY=...`
+- OCR backend mode:
+  - `export OCR_BACKEND=gcv_then_tesseract` (default, GCV first then local fallback)
+  - `export OCR_BACKEND=gcv` (GCV only)
+  - `export OCR_BACKEND=tesseract` (local only)
 
 ## URLs
 - User upload page: http://localhost:8000/

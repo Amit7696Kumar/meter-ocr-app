@@ -4,13 +4,23 @@ import os
 import re
 import sys
 import time
+import base64
+import json
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-import cv2
+try:
+    import cv2
+except Exception:
+    cv2 = None
 import numpy as np
 
-import pytesseract
+try:
+    import pytesseract
+except Exception:
+    pytesseract = None
 
 # DO NOT import ultralytics / torch at top-level.
 # Must be lazy-loaded inside functions to prevent server import crash/hang.
@@ -31,7 +41,14 @@ DEBUG_DIR.mkdir(parents=True, exist_ok=True)
 
 _yolo = None
 # Homebrew path on Apple Silicon (Tesseract)
-pytesseract.pytesseract.tesseract_cmd = "/opt/homebrew/bin/tesseract"
+if pytesseract is not None:
+    pytesseract.pytesseract.tesseract_cmd = "/opt/homebrew/bin/tesseract"
+
+
+def _get_pytesseract():
+    if pytesseract is None:
+        raise RuntimeError("pytesseract is not installed")
+    return pytesseract
 
 
 def _clean_digits(s: str) -> str:
@@ -77,6 +94,94 @@ def _best_number_from_text(text: str) -> Optional[str]:
         return None
     nums.sort(key=lambda x: len(x.replace(".", "")), reverse=True)
     return nums[0]
+
+
+def _ocr_backend_mode() -> str:
+    # gcv_then_tesseract (default), gcv, tesseract
+    return (os.getenv("OCR_BACKEND", "gcv_then_tesseract") or "").strip().lower()
+
+
+def _get_gcv_api_key() -> str:
+    api_key = (os.getenv("GCV_API_KEY", "") or "").strip()
+    if not api_key:
+        raise RuntimeError("GCV_API_KEY is not set")
+    return api_key
+
+
+def _gcv_lines_and_numeric(crop_bgr: np.ndarray) -> Tuple[List[Dict[str, Any]], Optional[str], float]:
+    if cv2 is None:
+        raise RuntimeError("cv2 is not available")
+    ok, encoded = cv2.imencode(".jpg", crop_bgr)
+    if not ok:
+        raise RuntimeError("Failed to encode crop as JPEG for GCV")
+    return _gcv_lines_and_numeric_from_bytes(encoded.tobytes())
+
+
+def _gcv_lines_and_numeric_from_bytes(image_bytes: bytes) -> Tuple[List[Dict[str, Any]], Optional[str], float]:
+    api_key = _get_gcv_api_key()
+    url = f"https://vision.googleapis.com/v1/images:annotate?key={api_key}"
+    log(f"[OCR][GCV] Hitting Vision API (bytes={len(image_bytes)})")
+    payload = {
+        "requests": [
+            {
+                "image": {"content": base64.b64encode(image_bytes).decode("ascii")},
+                "features": [{"type": "TEXT_DETECTION"}],
+            }
+        ]
+    }
+    req = urllib.request.Request(
+        url=url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            body = resp.read().decode("utf-8")
+            log(f"[OCR][GCV] Vision API response status={getattr(resp, 'status', 'unknown')}")
+            resp_obj = json.loads(body)
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")
+        log(f"[OCR][GCV] Vision API HTTP error status={e.code}")
+        raise RuntimeError(f"GCV HTTP {e.code}: {body}") from e
+    except Exception as e:
+        log(f"[OCR][GCV] Vision API request error: {e}")
+        raise RuntimeError(f"GCV request failed: {e}") from e
+
+    responses = resp_obj.get("responses", []) if isinstance(resp_obj, dict) else []
+    r0 = responses[0] if responses else {}
+    if isinstance(r0, dict) and r0.get("error"):
+        raise RuntimeError(f"GCV error: {r0.get('error')}")
+
+    anns = r0.get("textAnnotations", []) if isinstance(r0, dict) else []
+    lines: List[Dict[str, Any]] = []
+    best_value: Optional[str] = None
+    best_score = -1.0
+    best_conf01 = 0.0
+
+    if anns:
+        full = anns[0].get("description", "") or ""
+        for ln in [x.strip() for x in full.splitlines() if x.strip()]:
+            lines.append({"text": ln, "confidence": 0.0})
+
+    for ann in anns[1:] if len(anns) > 1 else []:
+        if not isinstance(ann, dict):
+            continue
+        text = (ann.get("description") or "").strip()
+        if not text:
+            continue
+        candidate = _best_number_from_text(_clean_digits(text))
+        if not candidate:
+            continue
+        conf01 = 0.0
+        score = _score_candidate(candidate, conf01)
+        if score > best_score:
+            best_score = score
+            best_value = candidate
+            best_conf01 = conf01
+
+    log(f"[OCR][GCV] Parsed lines={len(lines)} best_value={best_value or 'None'}")
+    return lines, best_value, best_conf01
 
 
 def _pad_box(x0: int, y0: int, x1: int, y1: int, w: int, h: int, pad: float = 0.10) -> Tuple[int, int, int, int]:
@@ -252,13 +357,14 @@ def _score_candidate(text: str, conf01: float, target_len: Optional[int] = None)
 
 
 def _tesseract_pass(gray: np.ndarray, psm: int, allow_dot: bool) -> Tuple[str, float]:
+    pt = _get_pytesseract()
     whitelist = "0123456789." if allow_dot else "0123456789"
     config = (
         f"--oem 1 --psm {psm} "
         f"-c tessedit_char_whitelist={whitelist} "
         "-c classify_bln_numeric_mode=1"
     )
-    data = pytesseract.image_to_data(gray, config=config, output_type=pytesseract.Output.DICT)
+    data = pt.image_to_data(gray, config=config, output_type=pt.Output.DICT)
 
     best_text = ""
     best_conf = -1.0
@@ -280,7 +386,7 @@ def _tesseract_pass(gray: np.ndarray, psm: int, allow_dot: bool) -> Tuple[str, f
 
     # Fallback: try full string parse
     if not best_text:
-        raw = pytesseract.image_to_string(gray, config=config)
+        raw = pt.image_to_string(gray, config=config)
         best_text = _best_number_from_text(_clean_digits(raw)) or ""
         best_conf = 30.0 if best_text else -1.0
 
@@ -498,6 +604,10 @@ def _consensus_pick(candidates: List[Tuple[str, float, str, float]], normalize=N
 
 
 def warmup_models() -> None:
+    backend = _ocr_backend_mode()
+    if cv2 is None or backend == "gcv":
+        log("[WARMUP] Skipping YOLO warmup (GCV-only mode or cv2 unavailable)")
+        return
     try:
         get_yolo()
     except Exception as e:
@@ -506,18 +616,84 @@ def warmup_models() -> None:
 
 def run_ocr(image_path: str, debug_id: Optional[str] = None, meter_type: Optional[str] = None) -> Dict[str, Any]:
     log(f"[OCR] Processing image: {image_path}")
+    backend = _ocr_backend_mode()
+    log(f"[OCR] Backend={backend} GCV_API_KEY_set={'yes' if bool((os.getenv('GCV_API_KEY', '') or '').strip()) else 'no'}")
+
+    if cv2 is None:
+        if backend not in {"gcv", "gcv_then_tesseract"}:
+            return {
+                "numeric": None,
+                "text": "",
+                "lines": [],
+                "used_crop": False,
+                "crop_box": None,
+                "debug": {"error": "cv2 is not available and OCR_BACKEND is not GCV"},
+            }
+        try:
+            with open(image_path, "rb") as f:
+                image_bytes = f.read()
+            gcv_lines, gcv_value, gcv_conf = _gcv_lines_and_numeric_from_bytes(image_bytes)
+            if meter_type == "earthing" and gcv_value:
+                normalized = _normalize_fixed_decimals(gcv_value, decimals=2)
+                if normalized and _is_earthing_format(normalized):
+                    gcv_value = normalized
+            if gcv_value:
+                return {
+                    "numeric": {"value": gcv_value, "confidence": float(gcv_conf)},
+                    "text": gcv_value,
+                    "lines": gcv_lines,
+                    "used_crop": False,
+                    "crop_box": None,
+                    "debug": {"provider": "google_vision", "ocr_conf": gcv_conf, "cv2": "unavailable"},
+                }
+            return {
+                "numeric": None,
+                "text": "",
+                "lines": gcv_lines,
+                "used_crop": False,
+                "crop_box": None,
+                "debug": {"provider": "google_vision", "ocr_conf": 0.0, "cv2": "unavailable"},
+            }
+        except Exception as e:
+            return {
+                "numeric": None,
+                "text": "",
+                "lines": [],
+                "used_crop": False,
+                "crop_box": None,
+                "debug": {"provider": "google_vision", "ocr_conf": 0.0, "cv2": "unavailable", "error": str(e)},
+            }
 
     img = cv2.imread(image_path)
     if img is None:
         return {"numeric": None, "text": "", "lines": [], "used_crop": False, "crop_box": None, "debug": {"error": "cv2.imread failed"}}
 
-    det = detect_lcd(img)
-    if det is None:
-        log("[YOLO]  No LCD detected")
-        return {"numeric": None, "text": "", "lines": [], "used_crop": False, "crop_box": None, "debug": {"yolo": "no box"}}
+    det = None
+    yolo_error: Optional[str] = None
+    try:
+        det = detect_lcd(img)
+    except Exception as e:
+        yolo_error = str(e)
+        log(f"[YOLO] Detection failed: {e}")
 
-    x0, y0, x1, y1, yconf = det
-    log(f"[YOLO] LCD detected at ({x0},{y0},{x1},{y1}) conf={yconf:.2f}")
+    if det is None:
+        if backend in {"gcv", "gcv_then_tesseract"}:
+            h, w = img.shape[:2]
+            x0, y0, x1, y1, yconf = 0, 0, w, h, 0.0
+            log("[YOLO] No LCD detected; using full image for GCV")
+        else:
+            log("[YOLO]  No LCD detected")
+            return {
+                "numeric": None,
+                "text": "",
+                "lines": [],
+                "used_crop": False,
+                "crop_box": None,
+                "debug": {"yolo": "no box", "error": yolo_error},
+            }
+    else:
+        x0, y0, x1, y1, yconf = det
+        log(f"[YOLO] LCD detected at ({x0},{y0},{x1},{y1}) conf={yconf:.2f}")
 
     crop = img[y0:y1, x0:x1].copy()
 
@@ -526,12 +702,69 @@ def run_ocr(image_path: str, debug_id: Optional[str] = None, meter_type: Optiona
         yolo_path = DEBUG_DIR / f"yolo_{debug_id}.jpg"
         crop_path = DEBUG_DIR / f"crop_{debug_id}.jpg"
 
-        save_yolo_debug(img, (x0, y0, x1, y1), str(yolo_path))
+        if det is not None:
+            save_yolo_debug(img, (x0, y0, x1, y1), str(yolo_path))
+        else:
+            cv2.imwrite(str(yolo_path), img)
         cv2.imwrite(str(crop_path), crop)
 
         debug_urls = {
             "yolo": f"/static/debug/yolo_{debug_id}.jpg",
             "crop": f"/static/debug/crop_{debug_id}.jpg",
+        }
+
+    if backend in {"gcv", "gcv_then_tesseract"}:
+        try:
+            gcv_lines, gcv_value, gcv_conf = _gcv_lines_and_numeric(crop)
+            if meter_type == "earthing" and gcv_value:
+                normalized = _normalize_fixed_decimals(gcv_value, decimals=2)
+                if normalized and _is_earthing_format(normalized):
+                    gcv_value = normalized
+            if gcv_value:
+                log(f"[OCR][GCV] FINAL VALUE = {gcv_value} (conf={gcv_conf:.2f})")
+                return {
+                    "numeric": {"value": gcv_value, "confidence": float(gcv_conf)},
+                    "text": gcv_value,
+                    "lines": gcv_lines,
+                    "used_crop": True,
+                    "crop_box": [x0, y0, x1 - x0, y1 - y0],
+                    "debug_urls": debug_urls,
+                    "debug": {"provider": "google_vision", "yolo_conf": yconf, "ocr_conf": gcv_conf},
+                }
+            log("[OCR][GCV] No numeric value extracted")
+            if backend == "gcv":
+                return {
+                    "numeric": None,
+                    "text": "",
+                    "lines": gcv_lines,
+                    "used_crop": True,
+                    "crop_box": [x0, y0, x1 - x0, y1 - y0],
+                    "debug_urls": debug_urls,
+                    "debug": {"provider": "google_vision", "yolo_conf": yconf, "ocr_conf": 0.0},
+                }
+        except Exception as e:
+            log(f"[OCR][GCV] Failed: {e}")
+            if backend == "gcv":
+                return {
+                    "numeric": None,
+                    "text": "",
+                    "lines": [],
+                    "used_crop": True,
+                    "crop_box": [x0, y0, x1 - x0, y1 - y0],
+                    "debug_urls": debug_urls,
+                    "debug": {"provider": "google_vision", "yolo_conf": yconf, "ocr_conf": 0.0, "error": str(e)},
+                }
+
+    if pytesseract is None:
+        log("[OCR][Tesseract] pytesseract unavailable; skipping local OCR")
+        return {
+            "numeric": None,
+            "text": "",
+            "lines": [],
+            "used_crop": True,
+            "crop_box": [x0, y0, x1 - x0, y1 - y0],
+            "debug_urls": debug_urls,
+            "debug": {"yolo_conf": yconf, "ocr_conf": 0.0, "error": "pytesseract not installed"},
         }
 
     variants = build_variants(crop)

@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
   <title>User — Meter OCR</title>
 
-  <link rel="stylesheet" href="/static/app.css">
+  <link rel="stylesheet" href="/static/app.css?v={{ static_version }}">
   <script src="/static/app.js" defer></script>
 
   <!-- Page-only polish (safe + minimal) -->
@@ -15,13 +15,13 @@
     .filters { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
     .table-wrap { overflow:auto; border-radius:12px; }
     .linklike { background:none; border:none; padding:0; cursor:pointer; text-decoration:underline; }
-    .helpbox { margin-top:10px; padding:10px 12px; border-radius:12px; border:1px solid rgba(255,255,255,.12); }
+    .helpbox { margin-top:10px; padding:10px 12px; border-radius:12px; border:1px solid var(--line); background: var(--panel2); }
     .helpbox ul { margin:8px 0 0 18px; }
-    .modal { display:none; position:fixed; inset:0; background:rgba(0,0,0,.55); z-index:9999; padding:18px; }
+    .modal { display:none; position:fixed; inset:0; background:rgba(18,20,16,.45); z-index:9999; padding:18px; }
     .modal.open { display:block; }
     .modal-card { max-width:1100px; margin:0 auto; }
     .imggrid { display:grid; grid-template-columns:1fr; gap:10px; }
-    .imgcard { border:1px solid rgba(255,255,255,.12); border-radius:12px; padding:10px; }
+    .imgcard { border:1px solid var(--line); border-radius:12px; padding:10px; background: var(--panel2); }
     .imgcard img { width:100%; border-radius:10px; display:block; }
     .imgcap { display:flex; justify-content:space-between; gap:10px; align-items:center; margin-bottom:8px; }
     .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
@@ -81,7 +81,13 @@
           <select class="input" name="meter_type" required>
             <option value="earthing">Earthing</option>
             <option value="temp">Temp</option>
+            <option value="voltage">Voltage</option>
           </select>
+        </label>
+
+        <label class="field">
+          <span>Manual Reading (optional)</span>
+          <input class="input" name="manual_value" placeholder="e.g. 0.93 / 230.0">
         </label>
 
         <label class="field">
@@ -109,6 +115,56 @@
           <li>Use PNG/JPG/WebP; avoid screenshots of screenshots.</li>
         </ul>
       </div>
+    </div>
+  </div>
+
+  <!-- MESSAGES -->
+  <div class="panel" style="margin-top:16px;">
+    <div class="panel-header">
+      <div class="panel-header-row">
+        <div>
+          <div class="panel-title">Messages</div>
+          <div class="panel-sub">Send to Admin/Coadmin</div>
+        </div>
+      </div>
+    </div>
+    <div class="panel-body">
+      <form method="post" action="/messages/send" class="stack" style="margin-bottom:12px;">
+        <div class="filters">
+          <select class="input" name="target_role" required>
+            <option value="coadmin">Coadmin</option>
+            <option value="admin">Admin</option>
+          </select>
+        </div>
+        <input class="input" name="body" placeholder="Write a message…" required />
+        <button class="btn primary" type="submit">Send Message</button>
+      </form>
+
+      {% if messages and messages|length > 0 %}
+        {% for m in messages %}
+          <div class="toast {% if m.is_read %}ok{% else %}error{% endif %}">
+            <div style="display:flex; justify-content:space-between; gap:10px; align-items:flex-start;">
+              <div>
+                <div style="font-weight:800;">
+                  From {{ m.sender_role|upper }}{% if m.sender_username %} ({{ m.sender_username }}){% endif %}
+                </div>
+                <div class="small-muted">
+                  To {{ m.target_role|upper }}{% if m.target_user_id %} (User ID {{ m.target_user_id }}){% elif m.target_team %} (Team {{ m.target_team }}){% endif %}
+                </div>
+                <div>{{ m.body }}</div>
+                <div class="small-muted">Created: {{ m.created_at }} • {% if m.is_read %}Read{% else %}Unread{% endif %}</div>
+              </div>
+              {% if not m.is_read %}
+                <form method="post" action="/messages/{{ m.id }}/read">
+                  <button class="btn small" type="submit">Mark Read</button>
+                </form>
+              {% endif %}
+            </div>
+          </div>
+        {% endfor %}
+      {% else %}
+        <div class="small-muted">No messages yet.</div>
+      {% endif %}
     </div>
   </div>
 
