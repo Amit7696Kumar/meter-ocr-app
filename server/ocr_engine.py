@@ -11,10 +11,8 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-try:
-    import cv2
-except Exception:
-    cv2 = None
+# Lazy-load cv2 to avoid interpreter crashes at import time on broken envs.
+cv2 = None
 import numpy as np
 
 try:
@@ -27,6 +25,20 @@ except Exception:
 
 def log(msg: str) -> None:
     print(msg, flush=True, file=sys.stdout)
+
+
+def _ensure_cv2_loaded() -> bool:
+    global cv2
+    if cv2 is not None:
+        return True
+    try:
+        import cv2 as _cv2
+        cv2 = _cv2
+        return True
+    except Exception as e:
+        log(f"[OCR] cv2 import failed: {e}")
+        cv2 = None
+        return False
 
 
 BASE_DIR = os.path.dirname(__file__)
@@ -182,6 +194,49 @@ def _gcv_lines_and_numeric_from_bytes(image_bytes: bytes) -> Tuple[List[Dict[str
 
     log(f"[OCR][GCV] Parsed lines={len(lines)} best_value={best_value or 'None'}")
     return lines, best_value, best_conf01
+
+
+def _gcv_full_text_from_bytes(image_bytes: bytes) -> str:
+    """
+    Fetch full OCR text from Google Vision API.
+    Returns empty string if no text is detected.
+    """
+    api_key = _get_gcv_api_key()
+    url = f"https://vision.googleapis.com/v1/images:annotate?key={api_key}"
+    payload = {
+        "requests": [
+            {
+                "image": {"content": base64.b64encode(image_bytes).decode("ascii")},
+                "features": [{"type": "TEXT_DETECTION"}],
+            }
+        ]
+    }
+    req = urllib.request.Request(
+        url=url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            body = resp.read().decode("utf-8")
+            resp_obj = json.loads(body)
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"GCV HTTP {e.code}: {body}") from e
+    except Exception as e:
+        raise RuntimeError(f"GCV request failed: {e}") from e
+
+    responses = resp_obj.get("responses", []) if isinstance(resp_obj, dict) else []
+    r0 = responses[0] if responses else {}
+    if isinstance(r0, dict) and r0.get("error"):
+        raise RuntimeError(f"GCV error: {r0.get('error')}")
+
+    anns = r0.get("textAnnotations", []) if isinstance(r0, dict) else []
+    if not anns:
+        return ""
+    full = anns[0].get("description", "") if isinstance(anns[0], dict) else ""
+    return (full or "").strip()
 
 
 def _pad_box(x0: int, y0: int, x1: int, y1: int, w: int, h: int, pad: float = 0.10) -> Tuple[int, int, int, int]:
@@ -605,8 +660,11 @@ def _consensus_pick(candidates: List[Tuple[str, float, str, float]], normalize=N
 
 def warmup_models() -> None:
     backend = _ocr_backend_mode()
-    if cv2 is None or backend == "gcv":
+    if backend == "gcv":
         log("[WARMUP] Skipping YOLO warmup (GCV-only mode or cv2 unavailable)")
+        return
+    if not _ensure_cv2_loaded():
+        log("[WARMUP] Skipping YOLO warmup (cv2 unavailable)")
         return
     try:
         get_yolo()
@@ -618,6 +676,9 @@ def run_ocr(image_path: str, debug_id: Optional[str] = None, meter_type: Optiona
     log(f"[OCR] Processing image: {image_path}")
     backend = _ocr_backend_mode()
     log(f"[OCR] Backend={backend} GCV_API_KEY_set={'yes' if bool((os.getenv('GCV_API_KEY', '') or '').strip()) else 'no'}")
+
+    if backend not in {"gcv", "gcv_then_tesseract"}:
+        _ensure_cv2_loaded()
 
     if cv2 is None:
         if backend not in {"gcv", "gcv_then_tesseract"}:
@@ -677,20 +738,12 @@ def run_ocr(image_path: str, debug_id: Optional[str] = None, meter_type: Optiona
         log(f"[YOLO] Detection failed: {e}")
 
     if det is None:
+        h, w = img.shape[:2]
+        x0, y0, x1, y1, yconf = 0, 0, w, h, 0.0
         if backend in {"gcv", "gcv_then_tesseract"}:
-            h, w = img.shape[:2]
-            x0, y0, x1, y1, yconf = 0, 0, w, h, 0.0
             log("[YOLO] No LCD detected; using full image for GCV")
         else:
-            log("[YOLO]  No LCD detected")
-            return {
-                "numeric": None,
-                "text": "",
-                "lines": [],
-                "used_crop": False,
-                "crop_box": None,
-                "debug": {"yolo": "no box", "error": yolo_error},
-            }
+            log("[YOLO] No LCD detected; using full image for Tesseract")
     else:
         x0, y0, x1, y1, yconf = det
         log(f"[YOLO] LCD detected at ({x0},{y0},{x1},{y1}) conf={yconf:.2f}")
@@ -994,4 +1047,96 @@ def run_ocr(image_path: str, debug_id: Optional[str] = None, meter_type: Optiona
         "crop_box": [x0, y0, x1 - x0, y1 - y0],
         "debug_urls": debug_urls,
         "debug": {"yolo_conf": yconf, "ocr_conf": ocr_conf, "best_variant": best_variant},
+    }
+
+
+def detect_fire_fighting_equipment(image_path: str) -> Dict[str, Any]:
+    """
+    Heuristic detector for fire point photos using OCR keyword matching.
+    Returns whether fire safety equipment is likely present in frame.
+    """
+    with open(image_path, "rb") as f:
+        image_bytes = f.read()
+    if not image_bytes:
+        raise RuntimeError("Failed to read image bytes for fire-point detection")
+
+    full_text_parts: List[str] = []
+    local_ocr_error = ""
+    img = None
+
+    # Local OCR is best-effort; GCV fallback should still work when cv2 is unavailable.
+    if _ensure_cv2_loaded() and cv2 is not None:
+        try:
+            tesseract = _get_pytesseract()
+            img = cv2.imread(image_path)
+            if img is not None:
+                gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(gray)
+                _, otsu = cv2.threshold(clahe, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+                variants = [
+                    ("gray", gray),
+                    ("clahe", clahe),
+                    ("otsu", otsu),
+                ]
+                for _, vimg in variants:
+                    text = tesseract.image_to_string(vimg, config="--oem 3 --psm 6")
+                    if text and text.strip():
+                        full_text_parts.append(text.strip().lower())
+            else:
+                local_ocr_error = "cv2 failed to decode image"
+        except Exception as e:
+            local_ocr_error = str(e)
+    else:
+        local_ocr_error = "cv2 is not available"
+
+    # Google Vision OCR (if configured) is combined with local OCR for better recall.
+    gcv_text = ""
+    gcv_error = ""
+    gcv_enabled = _ocr_backend_mode() in {"gcv", "gcv_then_tesseract"}
+    if gcv_enabled:
+        try:
+            gcv_text = _gcv_full_text_from_bytes(image_bytes).lower()
+        except Exception as e:
+            gcv_error = str(e)
+            log(f"[FIRE_POINT] GCV OCR failed: {e}")
+
+    full_text = "\n".join([p for p in [*full_text_parts, gcv_text] if p])
+
+    keywords = [
+        "fire extinguisher",
+        "extinguisher",
+        "hose reel",
+        "fire hose",
+        "hydrant",
+        "fire bucket",
+        "fire alarm",
+        "fire point",
+        "smoke detector",
+        "sprinkler",
+    ]
+    matched = [k for k in keywords if k in full_text]
+
+    # compact token fallback catches split words like "exting uisher"
+    token_hits = 0
+    for token in ["fire", "exting", "hydrant", "hose", "reel", "alarm", "sprinkler"]:
+        if token in full_text:
+            token_hits += 1
+
+    present = bool(matched) or token_hits >= 2
+    confidence = 0.9 if matched else (0.6 if token_hits >= 2 else 0.15)
+
+    if not full_text.strip():
+        detail = gcv_error or local_ocr_error or "No OCR text extracted"
+        raise RuntimeError(f"Unable to process fire point image: {detail}")
+
+    return {
+        "present": present,
+        "confidence": confidence,
+        "matched_keywords": matched,
+        "token_hits": token_hits,
+        "ocr_excerpt": full_text[:800],
+        "gcv_used": gcv_enabled,
+        "gcv_error": gcv_error or None,
+        "local_ocr_error": local_ocr_error or None,
     }

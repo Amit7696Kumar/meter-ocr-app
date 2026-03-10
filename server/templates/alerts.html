@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  {% set page_title = "Alerts — DET MONITORING APPLICATION" %}
+  {% include "_partials/head_assets.html" %}
+</head>
+<body class="app-shell alerts-page">
+<div class="nav">
+  <div class="nav-inner">
+    {% set brand_subtitle = "Alerts" %}
+    {% include "_partials/nav_brand.html" %}
+    <div class="badges">
+      <div class="badge">Role: <strong>{{ user.role|upper }}</strong></div>
+      <div class="badge">Unread Alerts: <strong id="unreadBadge">{{ unread_count }}</strong></div>
+      <a class="btn" href="/tasks">Tasks</a>
+      <a class="btn" href="/settings">Settings</a>
+      {% if user.role == "admin" %}
+      <a class="btn" href="/admin">Dashboard</a>
+      <form method="post" action="/alerts/clear/admin" onsubmit="return confirm('Clear all admin alerts?');" style="display:inline-flex;">
+        <button class="btn small btn-danger-outline" type="submit">Clear Alerts</button>
+      </form>
+      {% elif user.role == "coadmin" %}
+      <a class="btn" href="/coadmin/{{ user.team }}">Dashboard</a>
+      <form method="post" action="/alerts/clear/coadmin/{{ user.team }}" onsubmit="return confirm('Clear all alerts for this team?');" style="display:inline-flex;">
+        <button class="btn small btn-danger-outline" type="submit">Clear Alerts</button>
+      </form>
+      {% else %}
+      <a class="btn" href="/">Dashboard</a>
+      {% endif %}
+      <a class="btn btn-signout" href="/logout">Sign Out</a>
+    </div>
+  </div>
+</div>
+{% include "_partials/mobile_header.html" %}
+
+<div class="container">
+  <div id="chatMeta" data-user-id="{{ user.id }}" data-role="{{ user.role }}" data-team="{{ user.team or '' }}"></div>
+  <div class="page-head">
+    <div>
+      <h1 class="page-title">Alerts</h1>
+      <p class="page-lead">Monitor and acknowledge recent system alerts.</p>
+    </div>
+  </div>
+
+  {% if user.role in ["admin", "coadmin"] %}
+  <div class="alerts-mobile-actions">
+    {% if user.role == "admin" %}
+    <form method="post" action="/alerts/clear/admin" onsubmit="return confirm('Clear all admin alerts?');" style="display:inline-flex;">
+      <button class="btn small btn-danger-outline" type="submit">Clear Alerts</button>
+    </form>
+    {% else %}
+    <form method="post" action="/alerts/clear/coadmin/{{ user.team }}" onsubmit="return confirm('Clear all alerts for this team?');" style="display:inline-flex;">
+      <button class="btn small btn-danger-outline" type="submit">Clear Alerts</button>
+    </form>
+    {% endif %}
+  </div>
+  {% endif %}
+
+  <div class="panel">
+    <div class="panel-body">
+      {% if alerts and alerts|length > 0 %}
+      <div class="alerts-list">
+        {% for a in alerts %}
+        {% set sev = a.severity if a.severity in ['high','low'] else 'ok' %}
+        <div class="alert-card {{ sev }}">
+          <div class="alert-top">
+            <div>
+              <div>
+                <span class="pill {{ sev }}">{{ (a.severity or 'ok')|upper }}</span>
+                <span style="margin-left:8px; font-weight:800;">{{ a.message }}</span>
+              </div>
+              <div class="alert-meta">
+                <span>Created: {{ a.created_at }}</span>
+                <span>{% if a.is_read %}Read{% else %}Unread{% endif %}</span>
+              </div>
+            </div>
+            {% if not a.is_read %}
+            <form method="post" action="/alerts/{{ a.id }}/read">
+              <button class="btn small" type="submit">Mark as Read</button>
+            </form>
+            {% endif %}
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+      {% else %}
+      <div class="empty-state">
+        <h3 class="empty-title">No active alerts</h3>
+        <p class="empty-copy">Everything looks stable right now.</p>
+      </div>
+      {% endif %}
+    </div>
+  </div>
+</div>
+
+{% set active_page = "dashboard" %}
+{% include "_partials/bottom_nav.html" %}
+</body>
+</html>

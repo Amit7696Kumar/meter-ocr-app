@@ -1,444 +1,285 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width,initial-scale=1"/>
-  <title>Admin — Meter OCR</title>
-
-  <link rel="stylesheet" href="/static/app.css?v={{ static_version }}">
-  <script src="/static/app.js" defer></script>
-
-  <!-- Small safe UI polish for this page only (won’t break your existing CSS) -->
-  <style>
-    .topbar-actions { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
-    .panel-header-row { display:flex; justify-content:space-between; gap:12px; flex-wrap:wrap; align-items:flex-start; }
-    .filters { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
-    .table-wrap { overflow:auto; border-radius: 12px; }
-    .linklike { background: none; border: none; padding: 0; cursor: pointer; text-decoration: underline; }
-    .imggrid { display:grid; grid-template-columns:1fr; gap:10px; }
-    .imgcard { border:1px solid var(--line); border-radius:12px; padding:10px; background: var(--panel2); }
-    .imgcard img { width:100%; border-radius:10px; display:block; }
-    .imgcap { display:flex; justify-content:space-between; gap:10px; align-items:center; margin-bottom:8px; }
-    .imgcap .small-muted { margin:0; }
-    .modal { display:none; position:fixed; inset:0; background:rgba(18,20,16,.45); z-index:9999; padding:18px; }
-    .modal.open { display:block; }
-    .modal-card { max-width:1100px; margin:0 auto; }
-    @media (min-width: 980px){
-      .imggrid { grid-template-columns: 1fr 1fr; }
-    }
-    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
-  </style>
+  {% set page_title = "Admin — DET MONITORING APPLICATION" %}
+  {% include "_partials/head_assets.html" %}
 </head>
-
-<body>
-
-<!-- NAV -->
+<body class="app-shell">
 <div class="nav">
   <div class="nav-inner">
-    <div class="brand">
-      <div class="logo"></div>
-      <div>
-        <div>Meter OCR</div>
-        <div class="small-muted">Admin Dashboard</div>
-      </div>
-    </div>
-
+    {% set brand_subtitle = "Admin Dashboard" %}
+    {% include "_partials/nav_brand.html" %}
     <div class="badges">
-      <div class="badge">Role: <strong>ADMIN</strong></div>
+      <div class="badge">Role: <strong>{{ user.role|upper }}</strong></div>
       <div class="badge">Unread Alerts: <strong id="unreadBadge">{{ unread_count }}</strong></div>
-      <a class="btn" href="/logout">Logout</a>
+      <a class="btn small" href="/alerts" aria-label="Open Alerts">🔔 Alerts</a>
+      <a class="btn" href="/tasks">Tasks</a>
+      <a class="btn" href="/settings">Settings</a>
+      <button class="btn" type="button" id="openChatPopupBtn" onclick="window.__openChatPopup && window.__openChatPopup()">Open Messages</button>
+      <button class="btn btn-install js-install-app" type="button" hidden style="display:none;">Install App</button>
+      <a class="btn btn-signout" href="/logout">Sign Out</a>
     </div>
   </div>
 </div>
+{% include "_partials/mobile_header.html" %}
 
 <div class="container">
+  <div id="chatMeta" data-user-id="{{ user.id }}" data-role="{{ user.role }}" data-team="{{ user.team or '' }}"></div>
 
-  <div class="grid2">
-
-    <!-- LIVE ALERTS -->
-    <div class="panel">
-      <div class="panel-header">
-        <div class="panel-header-row">
-          <div>
-            <div class="panel-title">Live Alerts</div>
-            <div class="panel-sub">Auto-refresh every 10 seconds</div>
-          </div>
-          <div class="topbar-actions">
-            <a class="btn" href="/download/csv/admin">Download All CSV</a>
-            <form method="post" action="/alerts/clear/admin" onsubmit="return confirm('Clear all admin alerts?');">
-              <button class="btn small" type="submit">Clear All Alerts</button>
-            </form>
-          </div>
-        </div>
-      </div>
-
-      <div class="panel-body">
-        <!-- app.js will fill this -->
-        <div id="alertsLive" data-role="admin"></div>
-        <div id="adminAutoRefresh" data-latest-id="{{ latest_reading_id or 0 }}" style="display:none;"></div>
-
-        <div class="small-muted" style="margin-top:10px;">
-          Tip: Click “Mark Read” to clear alerts from unread count.
-        </div>
-      </div>
+  <div class="page-head">
+    <div>
+      <h1 class="page-title">Admin Dashboard</h1>
+      <p class="page-lead">Review alerts, readings, and task evidence.</p>
     </div>
-
-    <!-- TEAMS -->
-    <div class="panel">
-      <div class="panel-header">
-        <div>
-          <div class="panel-title">Teams</div>
-          <div class="panel-sub">Open coadmin view and download CSV</div>
-        </div>
-      </div>
-<div class="panel-body">
-  <div class="topbar-actions">
-
-    {% set team_names = {
-      1: "104 Bde",
-      2: "268 Bde",
-      3: "53 Bde",
-      4: "109 Bde",
-      5: "28 Arty Bde"
-    } %}
-
-    {% for t in teams %}
-      <a class="btn" href="/coadmin/{{ t }}">
-        {{ team_names.get(t, "Team " ~ t) }}
-      </a>
-      <a class="btn small" href="/download/csv/team/{{ t }}">
-        CSV
-      </a>
-    {% endfor %}
-
   </div>
-</div>
+  {% include "_partials/install_hint.html" %}
 
-        <div class="divider"></div>
-        <div class="small-muted"></div>
-      </div>
+  <div class="kpi">
+    <div class="card">
+      <div class="label">Total Task</div>
+      <div class="value">{{ (readings|length if readings else 0) + (task_instances|length if task_instances else 0) }}</div>
     </div>
-
+    <div class="card">
+      <div class="label">Total Alerts</div>
+      <div class="value">{{ alerts|length if alerts else 0 }}</div>
+    </div>
+    <div class="card">
+      <div class="label">Unread Alerts</div>
+      <div class="value">{{ unread_count }}</div>
+    </div>
   </div>
 
-  <div class="panel" style="margin-top:16px;">
-    <div class="panel-header">
-      <div class="panel-header-row">
-        <div>
-          <div class="panel-title">Messages</div>
-          <div class="panel-sub">Admin ↔ Coadmin/User communication</div>
-        </div>
-      </div>
-    </div>
+  <div class="panel">
     <div class="panel-body">
-      <form method="post" action="/messages/send" class="stack" style="margin-bottom:12px;">
-        <div class="filters">
-          <select class="input" name="target_role" required>
-            <option value="coadmin">Coadmin</option>
-            <option value="user">User</option>
-            <option value="admin">Admin</option>
-          </select>
-          <input class="input" name="target_team" placeholder="Team (optional)" />
-          <select class="input" name="target_username">
-            <option value="">Select user (optional)</option>
-            {% if all_users %}
-              {% for u in all_users %}
-                <option value="{{ u.username }}">{{ u.username }} ({{ u.role }}{% if u.team %} - T{{ u.team }}{% endif %})</option>
-              {% endfor %}
-            {% endif %}
-          </select>
-        </div>
-        <input class="input" name="body" placeholder="Write a message…" required />
-        <button class="btn primary" type="submit">Send Message</button>
-      </form>
-
-      {% if messages and messages|length > 0 %}
-        {% for m in messages %}
-          <div class="toast {% if m.is_read %}ok{% else %}error{% endif %}">
-            <div style="display:flex; justify-content:space-between; gap:10px; align-items:flex-start;">
-              <div>
-                <div style="font-weight:800;">
-                  From {{ m.sender_role|upper }}{% if m.sender_username %} ({{ m.sender_username }}){% endif %}
-                </div>
-                <div class="small-muted">
-                  To {{ m.target_role|upper }}{% if m.target_user_id %} (User ID {{ m.target_user_id }}){% elif m.target_team %} (Team {{ m.target_team }}){% endif %}
-                </div>
-                <div>{{ m.body }}</div>
-                <div class="small-muted">Created: {{ m.created_at }} • {% if m.is_read %}Read{% else %}Unread{% endif %}</div>
-              </div>
-              {% if not m.is_read %}
-                <form method="post" action="/messages/{{ m.id }}/read">
-                  <button class="btn small" type="submit">Mark Read</button>
-                </form>
-              {% endif %}
-            </div>
-          </div>
-        {% endfor %}
-      {% else %}
-        <div class="small-muted">No messages yet.</div>
-      {% endif %}
-    </div>
-  </div>
-
-  <!-- ALL READINGS -->
-  <div class="panel" style="margin-top:16px;">
-    <div class="panel-header">
-      <div class="panel-header-row">
-        <div>
-          <div class="panel-title">All Readings</div>
-          <div class="panel-sub">Click a value or “View” to open details in the same page</div>
-        </div>
-
-        <div class="filters">
-          <input id="searchReadings" class="input" placeholder="Search team/user/label/value..." />
-          <select id="meterFilter">
-            <option value="all">All meter types</option>
-            <option value="earthing">Earthing</option>
-            <option value="temp">Temp</option>
-          </select>
-        </div>
+      <div class="filters" style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+        <input id="searchReadings" class="input" placeholder="Search by task, user, value..." />
+        <select id="meterFilter">
+          <option value="all">All Task Titles</option>
+          <option value="earthing">Earthing Reading</option>
+          <option value="temp">Temperature Reading</option>
+          <option value="voltage">Voltage Reading</option>
+          <option value="odometer">Odometer Reading</option>
+          <option value="fire_point">Fire Point Check</option>
+        </select>
+        <select id="statusFilter">
+          <option value="all">All Status</option>
+          <option value="pending">Pending</option>
+          <option value="submitted">Submitted</option>
+          <option value="completed">Completed</option>
+          <option value="overdue">Overdue</option>
+          <option value="late">Late</option>
+        </select>
       </div>
-    </div>
 
-    <div class="panel-body">
-      {% if readings and readings|length > 0 %}
+      {% if (readings and readings|length > 0) or (task_instances and task_instances|length > 0) %}
       <div class="table-wrap">
-        <table class="table" id="readingsTable">
+        <table class="table mobile-friendly-table" id="readingsTable">
           <thead>
             <tr>
-              <th>Time</th>
-              <th>Team</th>
+              <th>ID</th>
+              <th>Timestamp</th>
+              <th>Task</th>
               <th>User</th>
-              <th>Meter</th>
-              <th>Label</th>
-              <th>Value</th>
               <th>Status</th>
+              <th class="num">Value</th>
               <th>Image</th>
             </tr>
           </thead>
-
           <tbody>
             {% for r in readings %}
-              {% set created_at = r['created_at'] if r is mapping else r.created_at %}
-              {% set team = r['team'] if r is mapping else r.team %}
-              {% set username = r['username'] if r is mapping else r.username %}
-              {% set meter_type = r['meter_type'] if r is mapping else r.meter_type %}
-              {% set label = r['label'] if r is mapping else r.label %}
-              {% set value = r['value'] if r is mapping else r.value %}
-              {% set filename = r['filename'] if r is mapping else r.filename %}
-              {% set ocr_json = r['ocr_json'] if r is mapping else r.ocr_json %}
-              {% set status = r['status'] if r is mapping else r.status %}
-              {% set status_class = r['status_class'] if r is mapping else r.status_class %}
-              {% set debug_yolo = r['debug_yolo'] if r is mapping else r.debug_yolo %}
-              {% set debug_crop = r['debug_crop'] if r is mapping else r.debug_crop %}
-              {% set debug_prep = r['debug_prep'] if r is mapping else r.debug_prep %}
-
-              <tr
-                data-meter="{{ meter_type }}"
-                data-team="{{ team }}"
-                data-user="{{ username }}"
-                data-label="{{ label }}"
-                data-created="{{ created_at }}"
-                data-value="{{ value or '' }}"
-                data-filename="{{ filename or '' }}"
-                data-ocrjson="{{ (ocr_json or '')|e }}"
-                data-debug-yolo="{{ debug_yolo or '' }}"
-                data-debug-crop="{{ debug_crop or '' }}"
-                data-debug-prep="{{ debug_prep or '' }}"
-              >
-                <td>{{ created_at }}</td>
-                <td><b>{{ team }}</b></td>
-                <td>{{ username }}</td>
-                <td><b>{{ meter_type }}</b></td>
-                <td>{{ label }}</td>
-
-                <td>
-                  {% if value %}
-                    <button class="linklike js-open-reading" type="button">{{ value }}</button>
-                  {% else %}
-                    <span class="small-muted">-</span>
-                  {% endif %}
-                </td>
-
-                <td>
-                  {% if status %}
-                    <span class="pill {{ status_class }}">{{ status }}</span>
-                  {% else %}
-                    <span class="small-muted">-</span>
-                  {% endif %}
-                </td>
-
-                <td>
-                  {% if filename %}
-                    <!-- IMPORTANT: This will open inside modal (same page) -->
-                    <button class="btn small js-open-image" type="button">View</button>
-                  {% else %}
-                    -
-                  {% endif %}
-                </td>
-              </tr>
+            <tr data-meter="{{ r.meter_type }}" data-user="{{ r.username }}" data-label="{{ r.label }}" data-created="{{ r.created_at }}" data-value="{{ r.value or '' }}" data-filename="{{ r.filename or '' }}" data-status="{{ (r.status or '')|lower }}">
+              <td>{{ r.id }}</td>
+              <td>{{ r.created_at }}</td>
+              <td><b>{{ r.label or r.meter_type }}</b></td>
+              <td>{{ r.username }}</td>
+              <td>
+                {% if r.status %}
+                <span class="pill {{ r.status_class }}">{{ r.status }}</span>
+                {% else %}
+                <span class="small-muted">-</span>
+                {% endif %}
+              </td>
+              <td class="num">
+                {% if r.value %}
+                <b>{{ r.value }}</b>
+                {% else %}
+                <span class="small-muted">-</span>
+                {% endif %}
+              </td>
+              <td>
+                {% if r.filename %}
+                <button class="btn small js-open-image" type="button" data-src="/uploads/{{ r.filename }}" {% if r.filename_2 %}data-src2="/uploads/{{ r.filename_2 }}"{% endif %}>Open</button>
+                {% else %}
+                -
+                {% endif %}
+              </td>
+            </tr>
+            {% endfor %}
+            {% for t in task_instances %}
+            <tr data-meter="task" data-user="{{ t.assigned_username or t.assigned_user_id }}" data-label="{{ t.title }}" data-created="{{ t.submitted_at or t.deadline_at }}" data-value="{{ '' if (t.response_value|string|lower) == 'overdue' else (t.response_value or '') }}" data-status="{{ (t.status or '')|lower }}">
+              <td>{{ t.id }}</td>
+              <td>{{ t.submitted_at or t.deadline_at }}</td>
+              <td><b>{{ t.title }}</b></td>
+              <td>{{ t.assigned_username or t.assigned_user_id }}</td>
+              <td>
+                <span class="pill {% if t.status == 'overdue' %}high{% elif t.status in ['submitted','late','completed'] %}ok{% else %}low{% endif %}">
+                  {{ t.status }}
+                </span>
+              </td>
+              <td class="num">
+                {% if t.response_value is not none and (t.response_value|string|lower) != 'overdue' %}
+                {{ t.response_value }}
+                {% if t.response_fuel_consumed is not none %}
+                <div class="small-muted">{{ t.response_fuel_consumed }} L</div>
+                {% endif %}
+                {% else %}
+                -
+                {% endif %}
+              </td>
+              <td>
+                {% if t.response_file_path and t.response_file_path.startswith('/uploads/') %}
+                <button class="btn small js-open-image" type="button" data-src="{{ t.response_file_path }}" {% if t.response_file_path_2 %}data-src2="{{ t.response_file_path_2 }}"{% endif %}>Open</button>
+                {% else %}
+                -
+                {% endif %}
+              </td>
+            </tr>
             {% endfor %}
           </tbody>
         </table>
       </div>
       {% else %}
-        <div class="small-muted">No readings yet.</div>
+      <div class="empty-state">
+        <h3 class="empty-title">No records uploaded yet</h3>
+        <p class="empty-copy">As soon as users upload entries or receive tasks, this table will populate automatically.</p>
+      </div>
       {% endif %}
+      <div id="adminAutoRefresh" data-latest-id="{{ latest_reading_id or 0 }}" style="display:none;"></div>
     </div>
   </div>
-
 </div>
 
-<!-- MODAL -->
+{% set active_page = "dashboard" %}
+{% include "_partials/bottom_nav.html" %}
+{% include "_partials/alerts_modal.html" %}
+
 <div class="modal" id="modal" aria-hidden="true">
-  <div class="modal-card">
+  <div class="modal-card image-modal-card">
     <div class="modal-head">
       <div>
         <div class="modal-title" id="modalTitle">Reading</div>
         <div class="small-muted" id="modalSub"></div>
       </div>
-      <button class="btn" type="button" id="modalClose">Close</button>
+      <button class="btn" type="button" id="modalClose">Done</button>
     </div>
-
     <div class="modal-body">
-      <div class="grid2">
+      <div id="modalImages" class="imggrid"></div>
+    </div>
+  </div>
+</div>
 
-        <div class="panel" style="margin:0;">
-          <div class="panel-header">
-            <div>
-              <div class="panel-title">Images</div>
-              <div class="panel-sub">Uploaded + YOLO + crop + preprocess</div>
-            </div>
-          </div>
-          <div class="panel-body">
-            <div class="imggrid" id="modalImages"></div>
-          </div>
-        </div>
-
-        <div class="panel" style="margin:0;">
-          <div class="panel-header">
-            <div>
-              <div class="panel-title">OCR JSON</div>
-              <div class="panel-sub">Raw OCR output for debugging</div>
-            </div>
-          </div>
-          <div class="panel-body">
-            <pre id="modalJson" class="mono" style="max-height:420px; overflow:auto;"></pre>
-          </div>
-        </div>
-
+<!-- CHAT POPUP -->
+<div class="modal chat-modal" id="chatPopup" aria-hidden="true">
+  <div class="modal-card chat-shell">
+    <div class="modal-head">
+      <div>
+        <div class="modal-title">Open Messages</div>
+        <div class="small-muted" id="chatPresenceLine">Secure in-app chat</div>
       </div>
+      <div style="display:flex; gap:8px;">
+        <button class="btn small" type="button" id="chatNewGroupBtn">New Group</button>
+        <button class="btn small" type="button" id="chatCloseBtn">Done</button>
+      </div>
+    </div>
+    <div class="modal-body chat-layout">
+      <aside class="chat-list-pane">
+        <div class="chat-list-head">
+          <div class="chat-page-title">Messages</div>
+          <button class="btn small" type="button" id="chatSidebarOptionsBtn">⋯</button>
+        </div>
+        <div class="chat-search-wrap">
+          <span class="chat-search-icon">🔎</span>
+          <input class="input" id="chatSearchInput" placeholder="Search messages.." />
+        </div>
+        <div class="chat-archive-row">
+          <div class="chat-archive-label" id="chatArchivedLabel">Archived messages (0)</div>
+          <button class="chat-archive-action" type="button" id="chatToggleArchivedBtn">View all</button>
+        </div>
+        <div id="chatConversations" class="chat-conversations"></div>
+      </aside>
+      <section class="chat-thread-pane">
+        <div class="chat-thread-head">
+          <div class="chat-thread-left">
+            <button class="btn small" type="button" id="chatBackBtn">←</button>
+            <div class="chat-thread-avatar" id="chatThreadAvatar">C</div>
+            <div>
+              <div id="chatThreadTitle" class="chat-thread-title">Select a conversation</div>
+              <div id="chatThreadMeta" class="small-muted"></div>
+            </div>
+          </div>
+          <button class="btn small" type="button" id="chatThreadMenuBtn">⋯</button>
+        </div>
+        <div id="chatMessages" class="chat-messages"></div>
+        <div class="chat-composer">
+          <div class="chat-composer-wrap">
+            <textarea class="input" id="chatComposerInput" placeholder="Write your message..." rows="2"></textarea>
+            <button class="chat-send-arrow" type="button" id="chatSendBtn" aria-label="Send message">➤</button>
+          </div>
+        </div>
+      </section>
     </div>
   </div>
 </div>
 
 <script>
-(function () {
-  function qs(sel, el=document){ return el.querySelector(sel); }
-  function qsa(sel, el=document){ return Array.from(el.querySelectorAll(sel)); }
+document.addEventListener("DOMContentLoaded", () => {
+  setupFiltering("readingsTable", "searchReadings", "meterFilter", "statusFilter");
+});
 
-  const modal = qs("#modal");
-  const modalClose = qs("#modalClose");
-  const modalTitle = qs("#modalTitle");
-  const modalSub = qs("#modalSub");
-  const modalImages = qs("#modalImages");
-  const modalJson = qs("#modalJson");
+document.addEventListener("click", (e) => {
+  const btn = e.target.closest(".js-open-image");
+  if (!btn) return;
+  const src1 = btn.dataset.src || "";
+  const src2 = btn.dataset.src2 || "";
+  const modal = document.getElementById("modal");
+  const images = document.getElementById("modalImages");
+  if (!modal || !images || !src1) return;
 
-  function openModal() {
-    modal.classList.add("open");
-    modal.setAttribute("aria-hidden", "false");
+  const cards = [];
+  cards.push(`
+    <div class="imgcard">
+      <div class="small-muted" style="margin-bottom:6px;">Image</div>
+      <img src="${src1}" style="width:100%;border-radius:10px;border:1px solid #333;" />
+    </div>
+  `);
+  if (src2) {
+    cards.push(`
+      <div class="imgcard">
+        <div class="small-muted" style="margin-bottom:6px;">Image 2</div>
+        <img src="${src2}" style="width:100%;border-radius:10px;border:1px solid #333;" />
+      </div>
+    `);
   }
-  function closeModal() {
+  images.innerHTML = cards.join("");
+  modal.classList.add("open");
+  modal.setAttribute("aria-hidden", "false");
+});
+
+document.getElementById("modalClose")?.addEventListener("click", () => {
+  const modal = document.getElementById("modal");
+  if (!modal) return;
+  modal.classList.remove("open");
+  modal.setAttribute("aria-hidden", "true");
+});
+
+document.getElementById("modal")?.addEventListener("click", (e) => {
+  const modal = document.getElementById("modal");
+  if (!modal) return;
+  if (e.target === modal) {
     modal.classList.remove("open");
     modal.setAttribute("aria-hidden", "true");
   }
-
-  function safePrettyJson(raw) {
-    if (!raw) return "";
-    try {
-      const obj = JSON.parse(raw);
-      return JSON.stringify(obj, null, 2);
-    } catch (e) {
-      // If already non-json / truncated etc.
-      return raw;
-    }
-  }
-
-  function buildImages(row) {
-    const filename = row.dataset.filename || "";
-    const yolo = row.dataset.debugYolo || "";
-    const crop = row.dataset.debugCrop || "";
-    const prep = row.dataset.debugPrep || "";
-
-    const imgs = [];
-
-    if (filename) imgs.push({ title: "Uploaded", src: "/uploads/" + filename });
-    if (yolo) imgs.push({ title: "YOLO", src: yolo });
-    if (crop) imgs.push({ title: "Crop", src: crop });
-    if (prep) imgs.push({ title: "Preprocess", src: prep });
-
-    modalImages.innerHTML = "";
-
-    if (!imgs.length) {
-      modalImages.innerHTML = '<div class="small-muted">No images available.</div>';
-      return;
-    }
-
-    imgs.forEach(item => {
-      const div = document.createElement("div");
-      div.className = "imgcard";
-      div.innerHTML = `
-        <div class="imgcap">
-          <div class="small-muted"><b>${item.title}</b></div>
-        </div>
-        <img src="${item.src}" alt="${item.title}" />
-      `;
-      modalImages.appendChild(div);
-    });
-  }
-
-  function openRow(row) {
-    const created = row.dataset.created || "";
-    const team = row.dataset.team || "";
-    const user = row.dataset.user || "";
-    const meter = row.dataset.meter || "";
-    const label = row.dataset.label || "";
-    const value = row.dataset.value || "";
-
-    modalTitle.textContent = `Team ${team} • ${meter.toUpperCase()} • ${value || "-"}`;
-    modalSub.textContent = `${created} — ${user} — ${label}`;
-
-    const rawJson = row.dataset.ocrjson || "";
-    modalJson.textContent = safePrettyJson(rawJson);
-
-    buildImages(row);
-    openModal();
-  }
-
-  // Close handlers
-  modalClose?.addEventListener("click", closeModal);
-  modal?.addEventListener("click", (e) => { if (e.target === modal) closeModal(); });
-  document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeModal(); });
-
-  // Wiring: clicking value OR View button opens same modal
-  document.addEventListener("click", (e) => {
-    const btnValue = e.target.closest(".js-open-reading");
-    const btnImg = e.target.closest(".js-open-image");
-    if (!btnValue && !btnImg) return;
-
-    const row = e.target.closest("tr");
-    if (!row) return;
-    openRow(row);
-  });
-
-  // Keep your existing filtering if you already have it
-  document.addEventListener("DOMContentLoaded", () => {
-    if (typeof setupFiltering === "function") {
-      setupFiltering("readingsTable", "searchReadings", "meterFilter");
-    }
-  });
-})();
+});
 </script>
-
 </body>
 </html>

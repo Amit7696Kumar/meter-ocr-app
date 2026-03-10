@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  {% set page_title = "Teams — DET MONITORING APPLICATION" %}
+  {% include "_partials/head_assets.html" %}
+</head>
+<body class="app-shell">
+<div class="nav">
+  <div class="nav-inner">
+    {% set brand_subtitle = "Teams" %}
+    {% include "_partials/nav_brand.html" %}
+    <div class="badges">
+      <div class="badge">Role: <strong>{{ user.role|upper }}</strong></div>
+      {% if user.role == "admin" %}
+      <a class="btn small" href="/alerts" aria-label="Open Alerts">🔔 Alerts</a>
+      <a class="btn" href="/admin">Dashboard</a>
+      {% elif user.role == "coadmin" %}
+      <a class="btn small" href="/alerts" aria-label="Open Alerts">🔔 Alerts</a>
+      <a class="btn" href="/coadmin/{{ user.team }}">Dashboard</a>
+      {% else %}
+      <a class="btn" href="/">Dashboard</a>
+      {% endif %}
+      <a class="btn" href="/tasks">Tasks</a>
+      <a class="btn" href="/settings">Settings</a>
+      <a class="btn btn-signout" href="/logout">Sign Out</a>
+    </div>
+  </div>
+</div>
+{% include "_partials/mobile_header.html" %}
+
+<div class="container">
+  <div id="chatMeta" data-user-id="{{ user.id }}" data-role="{{ user.role }}" data-team="{{ user.team or '' }}"></div>
+  <section class="teams-hero">
+    <div class="teams-hero-copy">
+      <h1 class="page-title">Teams</h1>
+      <p class="page-lead">Open team dashboards from one place and jump quickly to operations.</p>
+    </div>
+    <div class="teams-hero-stats">
+      <div class="teams-stat">
+        <div class="teams-stat-label">Visible Teams</div>
+        <div class="teams-stat-value">{{ teams|length if teams else 0 }}</div>
+      </div>
+      <div class="teams-stat">
+        <div class="teams-stat-label">Role</div>
+        <div class="teams-stat-value">{{ user.role|upper }}</div>
+      </div>
+    </div>
+  </section>
+
+  {% if teams and teams|length > 0 %}
+  <div class="team-grid">
+    {% for t in teams %}
+    <article class="team-card premium">
+      <div class="team-card-head">
+        <div class="team-card-badge">TEAM {{ t }}</div>
+        <div class="team-card-icon">🏢</div>
+      </div>
+      <div class="team-card-title">Team {{ t }} Command</div>
+      <div class="team-card-sub">Monitor alerts, submissions, and team activity.</div>
+      <div class="team-card-actions">
+        {% if user.role == "user" %}
+        <a class="btn small primary" href="/">Open Dashboard</a>
+        {% else %}
+        <a class="btn small primary" href="/coadmin/{{ t }}">Open Team</a>
+        {% endif %}
+        {% if user.role in ["admin", "coadmin"] %}
+        <a class="btn small" href="/download/csv/team/{{ t }}">Export CSV</a>
+        {% endif %}
+      </div>
+    </article>
+    {% endfor %}
+  </div>
+  {% else %}
+  <div class="panel">
+    <div class="panel-body">
+      <div class="empty-state">
+        <h3 class="empty-title">No team assigned</h3>
+        <p class="empty-copy">Contact administrator for team access.</p>
+      </div>
+    </div>
+  </div>
+  {% endif %}
+</div>
+
+{% set active_page = "dashboard" %}
+{% include "_partials/bottom_nav.html" %}
+{% include "_partials/alerts_modal.html" %}
+</body>
+</html>

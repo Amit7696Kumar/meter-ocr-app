@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  {% set page_title = "Tasks — DET MONITORING APPLICATION" %}
+  {% include "_partials/head_assets.html" %}
+</head>
+<body class="app-shell tasks-v2">
+<div class="nav">
+  <div class="nav-inner">
+    {% set brand_subtitle = "Task Module" %}
+    {% include "_partials/nav_brand.html" %}
+    <div class="badges">
+      <div class="badge">Role: <strong>{{ user.role|upper }}</strong></div>
+      {% if user.role == "admin" %}
+      <a class="btn" href="/admin">Dashboard</a>
+      {% elif user.role == "coadmin" %}
+      <a class="btn" href="/coadmin/{{ user.team }}">Dashboard</a>
+      {% else %}
+      <a class="btn" href="/">Dashboard</a>
+      {% endif %}
+      <a class="btn" href="/settings">Settings</a>
+      <button class="btn" type="button" id="openChatPopupBtn" onclick="window.__openChatPopup && window.__openChatPopup()">Open Messages</button>
+      <button class="btn btn-install js-install-app" type="button" hidden style="display:none;">Install App</button>
+      <a class="btn btn-signout" href="/logout">Sign Out</a>
+    </div>
+  </div>
+</div>
+{% include "_partials/mobile_header.html" %}
+
+<div class="container">
+  <div id="chatMeta" data-user-id="{{ user.id }}" data-role="{{ user.role }}" data-team="{{ user.team or '' }}"></div>
+  <div class="page-head">
+    <div>
+      <h1 class="page-title">Task Overview</h1>
+      <p class="page-lead">Track and manage tasks with ease. Monitor pending, submitted, and overdue tasks.</p>
+    </div>
+  </div>
+  {% include "_partials/install_hint.html" %}
+
+  {% if error %}
+  <div class="toast error" style="margin-bottom:12px;">Task action failed: {{ error }}</div>
+  {% endif %}
+
+  {% if user.role == "user" %}
+  <div class="kpi">
+    <div class="card kpi-total"><div class="label">Total</div><div class="value">{{ summary.total }}</div></div>
+    <div class="card kpi-pending"><div class="label">Pending</div><div class="value">{{ summary.pending }}</div></div>
+    <div class="card kpi-submitted"><div class="label">Submitted</div><div class="value">{{ summary.submitted }}</div></div>
+    <div class="card kpi-overdue"><div class="label">Overdue</div><div class="value">{{ summary.overdue }}</div></div>
+  </div>
+  {% endif %}
+
+  {% if user.role in ["admin", "coadmin"] %}
+  <div class="panel">
+    <div class="panel-header">
+      <div>
+        <div class="panel-title">Create Task</div>
+        <div class="panel-sub">Assign users, choose response type, deadline, AI toggle, and recurrence.</div>
+      </div>
+    </div>
+    <div class="panel-body">
+      <form method="post" action="/tasks/create" class="stack">
+        <label class="field">
+          <span>Task Title</span>
+          <select class="input" name="title" id="taskTitleSelect" required>
+            <option value="Earthing Reading">Earthing Reading</option>
+            <option value="Temperature Reading">Temperature Reading</option>
+            <option value="Voltage Reading">Voltage Reading</option>
+            <option value="Odometer Reading">Odometer Reading</option>
+            <option value="Fire Point Check">Fire Point Check</option>
+            <option value="Custom">Custom</option>
+          </select>
+        </label>
+
+        <label class="field" id="customTaskTitleWrap" style="display:none;">
+          <span>Custom Task Title</span>
+          <input class="input" name="custom_title" id="customTaskTitleInput" placeholder="Enter custom task title">
+        </label>
+
+        <label class="field">
+          <span>Description / Instructions</span>
+          <textarea class="input" name="description" rows="3" placeholder="Write clear submission instructions"></textarea>
+        </label>
+
+        <label class="field">
+          <span id="idealValueLabel">Ideal Value (max)</span>
+          <input class="input" type="number" step="any" name="ideal_value" id="idealValueInput" placeholder="e.g. 2.0 for earthing">
+        </label>
+
+        <div class="grid2">
+          <label class="field">
+            <span>Assign Scope</span>
+            <select class="input" name="assigned_scope" id="assignedScope" required>
+              <option value="users">Specific Users</option>
+              <option value="team">Whole Team</option>
+            </select>
+          </label>
+
+          <div class="field" id="assignTargetField">
+            <span id="assignTargetLabel">Assign Users</span>
+            <div id="assignUsersControls">
+              <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+                <select class="input" id="assignedUserPicker" style="min-width:280px;">
+                  <option value="">Select user</option>
+                  {% for x in assignable_users %}
+                    <option value="{{ x.id }}">{{ x.username }} (ID {{ x.id }})</option>
+                  {% endfor %}
+                </select>
+                <button class="btn small" type="button" id="addAssignedUserBtn">Add User</button>
+              </div>
+              <div id="assignedUsersList" style="display:flex; gap:8px; flex-wrap:wrap; margin-top:8px;"></div>
+              <div id="assignedUsersHidden"></div>
+            </div>
+            <div id="assignTeamControls" style="display:none;">
+              <select class="input" name="assigned_team_id" id="assignedTeamSelect">
+                {% if user.role == "admin" %}
+                  <option value="">Select team</option>
+                  {% for t in [1,2,3,4,5,6] %}
+                  <option value="{{ t }}">Team{{ t }}</option>
+                  {% endfor %}
+                {% else %}
+                  <option value="{{ user.team }}">Team{{ user.team }}</option>
+                {% endif %}
+              </select>
+            </div>
+          </div>
+        </div>
+
+        <div class="grid2">
+          <label class="field">
+            <span>Deadline Date</span>
+            <input class="input" type="date" name="deadline_date" required>
+          </label>
+          <label class="field">
+            <span>Deadline Time</span>
+            <input class="input" type="time" name="deadline_time" required>
+          </label>
+        </div>
+
+        <div class="field">
+          <span>Allowed Response Types</span>
+          <div class="filters">
+            <label><input type="checkbox" name="allowed_types" value="pdf"> PDF</label>
+            <label><input type="checkbox" name="allowed_types" value="photo" checked> Photo</label>
+            <label><input type="checkbox" name="allowed_types" value="video"> Video</label>
+          </div>
+        </div>
+
+        <input type="hidden" name="question_type" value="upload">
+        <input type="hidden" name="number_unit" value="">
+        <input type="hidden" name="number_min" value="">
+        <input type="hidden" name="number_max" value="">
+
+        <div class="filters">
+          <label><input type="checkbox" name="ai_enabled" value="1"> Execute AI on submitted response</label>
+        </div>
+
+        <div class="filters">
+          <label><input type="checkbox" name="repeat_enabled" value="1" id="repeatEnabled"> Auto-create again</label>
+          <select class="input" name="repeat_type" id="repeatType" style="max-width:220px;" disabled>
+            <option value="daily">Daily</option>
+            <option value="weekly">Weekly</option>
+            <option value="monthly">Monthly</option>
+            <option value="interval">Custom Interval</option>
+          </select>
+          <input class="input" type="number" name="repeat_interval_days" id="repeatDays" min="1" placeholder="Interval days" style="max-width:180px; display:none;">
+        </div>
+
+        <button class="btn primary" type="submit">Create Task</button>
+      </form>
+    </div>
+  </div>
+  {% endif %}
+
+  {% if user.role == "user" %}
+  <div style="margin-top:16px;">
+    {% if user.role == "user" %}
+    <div class="task-filters" style="margin-bottom:12px;">
+      <a class="task-filter-pill {% if status_filter == 'all' %}active{% endif %}" href="/tasks?status=all">All</a>
+      <a class="task-filter-pill {% if status_filter == 'pending' %}active{% endif %}" href="/tasks?status=pending">Pending</a>
+      <a class="task-filter-pill {% if status_filter == 'submitted' %}active{% endif %}" href="/tasks?status=submitted">Submitted</a>
+      <a class="task-filter-pill {% if status_filter == 'overdue' %}active{% endif %}" href="/tasks?status=overdue">Overdue</a>
+    </div>
+    {% endif %}
+    <div>
+      {% if instances %}
+      <div class="task-card-list">
+        {% for t in instances %}
+        <article class="task-instance-card">
+          <div class="task-card-row">
+            <div class="task-id">ID {{ t.id }}</div>
+            <span class="pill task-status-pill {% if t.status == 'overdue' %}high{% elif t.status in ['submitted','late','completed'] %}ok{% else %}low{% endif %}">{{ t.status }}</span>
+          </div>
+          <h3 class="task-card-title">{{ t.title }}</h3>
+          <p class="task-card-desc">{{ t.description or "-" }}</p>
+          <div class="task-meta-line">🕒 {{ t.deadline_at }}</div>
+          {% if user.role != "user" %}
+          <div class="task-meta-line">👤 {{ t.assigned_username or t.assigned_user_id }}</div>
+          {% endif %}
+          <div class="task-meta-line">AI: {{ "Enabled" if t.ai_enabled else "Disabled" }}</div>
+
+          <div class="task-response-block">
+            {% if user.role == "user" %}
+              {% if t.status == "overdue" %}
+                <span class="small-muted">Deadline passed</span>
+              {% elif t.status in ["submitted", "late", "completed"] %}
+                <span class="small-muted">Already submitted</span>
+              {% else %}
+                <form method="post" action="/tasks/{{ t.id }}/submit" enctype="multipart/form-data" class="stack">
+                  {% if (t.title or '')|lower == 'odometer reading' %}
+                  <label class="field">
+                    <span>Start Image</span>
+                    <input class="input" type="file" name="response_file_start" accept=".jpg,.jpeg,.png,.webp" required>
+                  </label>
+                  <label class="field">
+                    <span>End Image</span>
+                    <input class="input" type="file" name="response_file_end" accept=".jpg,.jpeg,.png,.webp" required>
+                  </label>
+                  <label class="field">
+                    <span>Average KMPL</span>
+                    <input class="input" type="text" value="{{ t.number_max if t.number_max is not none else '-' }}" readonly>
+                  </label>
+                  {% else %}
+                  <input class="input" type="file" name="response_file" {% if t.question_type != "number" %}required{% endif %}>
+                  {% endif %}
+                  {% if t.question_type in ["number", "upload_number"] %}
+                  <input class="input" type="number" step="any" name="entered_number" placeholder="Enter numeric response{% if t.number_unit %} ({{ t.number_unit }}){% endif %}" {% if t.question_type == "number" %}required{% endif %}>
+                  {% endif %}
+                  <input class="input" name="remarks" placeholder="Remarks (optional)">
+                  <button class="btn small primary" type="submit">Submit</button>
+                </form>
+              {% endif %}
+            {% else %}
+              <span class="small-muted">Monitoring view</span>
+            {% endif %}
+          </div>
+        </article>
+        {% endfor %}
+      </div>
+      {% else %}
+      <div class="empty-state">
+        <h3 class="empty-title">No tasks found</h3>
+        <p class="empty-copy">Create a task form to assign users and collect PDF/photo/video responses.</p>
+      </div>
+      {% endif %}
+    </div>
+  </div>
+  {% endif %}
+</div>
+
+{% set active_page = "tasks" %}
+{% include "_partials/bottom_nav.html" %}
+{% include "_partials/alerts_modal.html" %}
+
+<!-- CHAT POPUP -->
+<div class="modal chat-modal" id="chatPopup" aria-hidden="true">
+  <div class="modal-card chat-shell">
+    <div class="modal-head">
+      <div>
+        <div class="modal-title">Open Messages</div>
+        <div class="small-muted" id="chatPresenceLine">Secure in-app chat</div>
+      </div>
+      <div style="display:flex; gap:8px;">
+        <button class="btn small" type="button" id="chatNewGroupBtn">New Group</button>
+        <button class="btn small" type="button" id="chatCloseBtn">Done</button>
+      </div>
+    </div>
+    <div class="modal-body chat-layout">
+      <aside class="chat-list-pane">
+        <div class="chat-list-head">
+          <div class="chat-page-title">Messages</div>
+          <button class="btn small" type="button" id="chatSidebarOptionsBtn">⋯</button>
+        </div>
+        <div class="chat-search-wrap">
+          <span class="chat-search-icon">🔎</span>
+          <input class="input" id="chatSearchInput" placeholder="Search messages.." />
+        </div>
+        <div class="chat-archive-row">
+          <div class="chat-archive-label" id="chatArchivedLabel">Archived messages (0)</div>
+          <button class="chat-archive-action" type="button" id="chatToggleArchivedBtn">View all</button>
+        </div>
+        <div id="chatConversations" class="chat-conversations"></div>
+      </aside>
+      <section class="chat-thread-pane">
+        <div class="chat-thread-head">
+          <div class="chat-thread-left">
+            <button class="btn small" type="button" id="chatBackBtn">←</button>
+            <div class="chat-thread-avatar" id="chatThreadAvatar">C</div>
+            <div>
+              <div id="chatThreadTitle" class="chat-thread-title">Select a conversation</div>
+              <div id="chatThreadMeta" class="small-muted"></div>
+            </div>
+          </div>
+          <button class="btn small" type="button" id="chatThreadMenuBtn">⋯</button>
+        </div>
+        <div id="chatMessages" class="chat-messages"></div>
+        <div class="chat-composer">
+          <div class="chat-composer-wrap">
+            <textarea class="input" id="chatComposerInput" placeholder="Write your message..." rows="2"></textarea>
+            <button class="chat-send-arrow" type="button" id="chatSendBtn" aria-label="Send message">➤</button>
+          </div>
+        </div>
+      </section>
+    </div>
+  </div>
+</div>
+
+<script>
+  const assignedScope = document.getElementById("assignedScope");
+  const assignTargetLabel = document.getElementById("assignTargetLabel");
+  const assignUsersControls = document.getElementById("assignUsersControls");
+  const assignTeamControls = document.getElementById("assignTeamControls");
+  const assignedTeamSelect = document.getElementById("assignedTeamSelect");
+  const assignedUserPicker = document.getElementById("assignedUserPicker");
+  const addAssignedUserBtn = document.getElementById("addAssignedUserBtn");
+  const assignedUsersList = document.getElementById("assignedUsersList");
+  const assignedUsersHidden = document.getElementById("assignedUsersHidden");
+  const selectedAssignedUsers = new Map();
+
+  function renderAssignedUsers() {
+    if (!assignedUsersList || !assignedUsersHidden) return;
+    assignedUsersList.innerHTML = "";
+    assignedUsersHidden.innerHTML = "";
+    selectedAssignedUsers.forEach((label, id) => {
+      const chip = document.createElement("span");
+      chip.className = "pill low";
+      chip.style.display = "inline-flex";
+      chip.style.alignItems = "center";
+      chip.style.gap = "6px";
+      chip.innerHTML = `${label} <button type="button" class="btn small" data-remove-user="${id}" style="height:24px; padding:0 6px;">x</button>`;
+      assignedUsersList.appendChild(chip);
+
+      const hidden = document.createElement("input");
+      hidden.type = "hidden";
+      hidden.name = "assigned_user_ids";
+      hidden.value = String(id);
+      assignedUsersHidden.appendChild(hidden);
+    });
+  }
+
+  function addAssignedUserFromPicker() {
+    if (!assignedUserPicker) return;
+    const id = (assignedUserPicker.value || "").trim();
+    if (!id) return;
+    const text = assignedUserPicker.options[assignedUserPicker.selectedIndex]?.text || id;
+    if (!selectedAssignedUsers.has(id)) {
+      selectedAssignedUsers.set(id, text);
+      renderAssignedUsers();
+    }
+  }
+
+  addAssignedUserBtn?.addEventListener("click", addAssignedUserFromPicker);
+  assignedUserPicker?.addEventListener("change", addAssignedUserFromPicker);
+  assignedUsersList?.addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-remove-user]");
+    if (!btn) return;
+    const id = btn.getAttribute("data-remove-user");
+    if (!id) return;
+    selectedAssignedUsers.delete(id);
+    renderAssignedUsers();
+  });
+  function syncScope() {
+    if (!assignedScope) return;
+    const isTeam = assignedScope.value === "team";
+    if (assignTargetLabel) assignTargetLabel.textContent = isTeam ? "Assign Team" : "Assign Users";
+    if (assignUsersControls) assignUsersControls.style.display = isTeam ? "none" : "";
+    if (assignTeamControls) assignTeamControls.style.display = isTeam ? "" : "none";
+    if (assignedUserPicker) assignedUserPicker.disabled = isTeam;
+    if (addAssignedUserBtn) addAssignedUserBtn.disabled = isTeam;
+    if (assignedTeamSelect) {
+      assignedTeamSelect.disabled = !isTeam;
+      assignedTeamSelect.required = isTeam;
+    }
+    if (isTeam && selectedAssignedUsers.size > 0) {
+      selectedAssignedUsers.clear();
+      renderAssignedUsers();
+    }
+  }
+  assignedScope?.addEventListener("change", syncScope);
+  syncScope();
+
+  const repeatEnabled = document.getElementById("repeatEnabled");
+  const repeatType = document.getElementById("repeatType");
+  const repeatDays = document.getElementById("repeatDays");
+  function syncRepeat() {
+    const on = repeatEnabled && repeatEnabled.checked;
+    if (repeatType) repeatType.disabled = !on;
+    if (repeatDays) repeatDays.style.display = (on && repeatType && repeatType.value === "interval") ? "" : "none";
+  }
+  repeatEnabled?.addEventListener("change", syncRepeat);
+  repeatType?.addEventListener("change", syncRepeat);
+  syncRepeat();
+
+  const taskTitleSelect = document.getElementById("taskTitleSelect");
+  const customTaskTitleWrap = document.getElementById("customTaskTitleWrap");
+  const customTaskTitleInput = document.getElementById("customTaskTitleInput");
+  const idealValueLabel = document.getElementById("idealValueLabel");
+  const idealValueInput = document.getElementById("idealValueInput");
+  function syncTaskTitle() {
+    const selectedTitle = taskTitleSelect ? taskTitleSelect.value : "";
+    const isCustom = selectedTitle === "Custom";
+    const isOdometer = selectedTitle === "Odometer Reading";
+    if (customTaskTitleWrap) customTaskTitleWrap.style.display = isCustom ? "" : "none";
+    if (customTaskTitleInput) customTaskTitleInput.required = !!isCustom;
+    if (idealValueLabel) idealValueLabel.textContent = isOdometer ? "Average KMPL" : "Ideal Value (max)";
+    if (idealValueInput) idealValueInput.placeholder = isOdometer ? "e.g. 5.5" : "e.g. 2.0 for earthing";
+  }
+  taskTitleSelect?.addEventListener("change", syncTaskTitle);
+  syncTaskTitle();
+
+</script>
+</body>
+</html>

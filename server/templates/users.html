@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  {% set page_title = "Users — DET MONITORING APPLICATION" %}
+  {% include "_partials/head_assets.html" %}
+</head>
+<body class="app-shell">
+<div class="nav">
+  <div class="nav-inner">
+    {% set brand_subtitle = "Users" %}
+    {% include "_partials/nav_brand.html" %}
+    <div class="badges">
+      <div class="badge">Role: <strong>{{ user.role|upper }}</strong></div>
+      <a class="btn small" href="/alerts" aria-label="Open Alerts">🔔 Alerts</a>
+      {% if user.role == "admin" %}
+      <a class="btn" href="/admin">Dashboard</a>
+      {% else %}
+      <a class="btn" href="/coadmin/{{ user.team }}">Dashboard</a>
+      {% endif %}
+      <a class="btn" href="/tasks">Tasks</a>
+      <a class="btn" href="/settings">Settings</a>
+      <a class="btn btn-signout" href="/logout">Sign Out</a>
+    </div>
+  </div>
+</div>
+{% include "_partials/mobile_header.html" %}
+
+<div class="container">
+  <div id="chatMeta" data-user-id="{{ user.id }}" data-role="{{ user.role }}" data-team="{{ user.team or '' }}"></div>
+  <div class="page-head">
+    <div>
+      <h1 class="page-title">Users</h1>
+      <p class="page-lead">All registered users and their current team mapping.</p>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-body">
+      {% if users_list and users_list|length > 0 %}
+      <div class="table-wrap">
+        <table class="table">
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Username</th>
+              <th>Role</th>
+              <th>Team</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for u in users_list %}
+            <tr>
+              <td>{{ u.id }}</td>
+              <td><b>{{ u.username }}</b></td>
+              <td><span class="pill low">{{ u.role }}</span></td>
+              <td>{{ u.team if u.team is not none else "-" }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% else %}
+      <div class="empty-state">
+        <h3 class="empty-title">No users found</h3>
+        <p class="empty-copy">User records will appear here automatically.</p>
+      </div>
+      {% endif %}
+    </div>
+  </div>
+</div>
+
+{% set active_page = "dashboard" %}
+{% include "_partials/bottom_nav.html" %}
+{% include "_partials/alerts_modal.html" %}
+</body>
+</html>

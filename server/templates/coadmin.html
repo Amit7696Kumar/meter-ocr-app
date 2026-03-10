@@ -1,49 +1,63 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width,initial-scale=1"/>
-
   {% set team_names = {
-    1: "104 Bde",
-    2: "268 Bde",
-    3: "53 Bde",
-    4: "109 Bde",
-    5: "28 Arty Bde"
+    1: "Team1",
+    2: "Team2",
+    3: "Team3",
+    4: "Team4",
+    5: "Team5",
+    6: "Team6"
   } %}
 
-  <title>
-    Coadmin — {{ team_names.get(team_id, "Team " ~ team_id) }}
-  </title>
-
-  <link rel="stylesheet" href="/static/app.css?v={{ static_version }}">
-  <script src="/static/app.js"></script>
+  {% set page_title = "Coadmin — " ~ team_names.get(team_id, "Team " ~ team_id) %}
+  {% include "_partials/head_assets.html" %}
 </head>
+
+<body class="app-shell">
 
 <div class="nav">
   <div class="nav-inner">
-    <div class="brand">
-      <div class="logo"></div>
-      <div>
-        <div>Meter OCR</div>
-        <div class="small-muted">Team Dashboard</div>
-      </div>
-    </div>
+    {% set brand_subtitle = "Team Dashboard" %}
+    {% include "_partials/nav_brand.html" %}
     <div class="badges">
       <div class="badge">Role: <strong>{{ user.role }}</strong></div>
       <div class="badge">Team: <strong>{{ team_id }}</strong></div>
       <div class="badge">Unread Alerts: <strong id="unreadBadge">{{ unread_count }}</strong></div>
-      <a class="btn" href="/logout">Logout</a>
+      <a class="btn small" href="/alerts" aria-label="Open Alerts">🔔 Alerts</a>
+      <a class="btn" href="/tasks">Tasks</a>
+      <a class="btn" href="/users">Users</a>
+      <a class="btn" href="/settings">Settings</a>
+      <button class="btn" type="button" id="openChatPopupBtn" onclick="window.__openChatPopup && window.__openChatPopup()">Open Messages</button>
+      <button class="btn btn-install js-install-app" type="button" hidden style="display:none;">Install App</button>
+      <a class="btn btn-signout" href="/logout">Sign Out</a>
     </div>
   </div>
 </div>
+{% include "_partials/mobile_header.html" %}
+
 
 <div class="container">
+  <div id="chatMeta" data-user-id="{{ user.id }}" data-role="{{ user.role }}" data-team="{{ user.team or '' }}"></div>
+
+  <div class="page-head">
+    <div>
+      <h1 class="page-title">Team {{ team_id }} Operations</h1>
+      <p class="page-lead">Track incoming readings, resolve alerts early, and keep your team within thresholds.</p>
+    </div>
+  </div>
+  {% include "_partials/install_hint.html" %}
+  {% if request.query_params.get("info") %}
+    <div class="toast ok">{{ request.query_params.get("info") }}</div>
+  {% endif %}
+  {% if request.query_params.get("err") %}
+    <div class="toast error">{{ request.query_params.get("err") }}</div>
+  {% endif %}
 
   <div class="kpi">
     <div class="card">
-      <div class="label">Total Readings</div>
-      <div class="value">{{ readings|length if readings else 0 }}</div>
+      <div class="label">Total Task</div>
+      <div class="value">{{ total_task_count or 0 }}</div>
     </div>
     <div class="card">
       <div class="label">Total Alerts</div>
@@ -56,45 +70,58 @@
   </div>
 
     <div class="panel">
-      <div class="tabs">
-        <div class="tab active" data-tab="readings">Readings</div>
-        <div class="tab" data-tab="alerts">Alerts</div>
-        <div class="tab" data-tab="messages">Messages</div>
-      </div>
-
     <!-- READINGS -->
-    <div class="tab-content active" data-tab-content="readings">
+    <div class="panel-body">
 
-      <div class="filters">
-        <input id="searchReadings" class="input" placeholder="Search label / value / user..." />
+      <div class="filters" style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+        <input id="searchReadings" class="input" placeholder="Search by label, value, or user..." />
         <select id="meterFilter">
-          <option value="all">All meter types</option>
-          <option value="earthing">Earthing</option>
-          <option value="temp">Temp</option>
+          <option value="all">All Task Titles</option>
+          <option value="earthing">Earthing Reading</option>
+          <option value="temp">Temperature Reading</option>
+          <option value="voltage">Voltage Reading</option>
+          <option value="odometer">Odometer Reading</option>
+          <option value="fire_point">Fire Point Check</option>
+        </select>
+        <select id="statusFilter">
+          <option value="all">All Status</option>
+          <option value="pending">Pending</option>
+          <option value="submitted">Submitted</option>
+          <option value="completed">Completed</option>
+          <option value="overdue">Overdue</option>
+          <option value="late">Late</option>
         </select>
       </div>
 
-      {% if readings and readings|length > 0 %}
-      <table class="table" id="readingsTable">
+      {% if (readings and readings|length > 0) or (task_instances and task_instances|length > 0) %}
+      <div class="table-wrap">
+      <table class="table mobile-friendly-table" id="readingsTable">
         <thead>
           <tr>
-            <th>Time</th>
+            <th>ID</th>
+            <th>Timestamp</th>
+            <th>Task</th>
             <th>User</th>
-            <th>Meter</th>
-            <th>Label</th>
-            <th>Value</th>
+            <th>Status</th>
+            <th class="num">Value</th>
             <th>Image</th>
-            <th>Debug</th>
           </tr>
         </thead>
         <tbody>
           {% for r in readings %}
-          <tr data-meter="{{ r.meter_type }}">
+          <tr data-meter="{{ r.meter_type }}" data-user="{{ r.username }}" data-label="{{ r.label }}" data-created="{{ r.created_at }}" data-value="{{ r.value or '' }}" data-filename="{{ r.filename or '' }}" data-status="{{ (r.status or '')|lower }}">
+            <td>{{ r.id }}</td>
             <td>{{ r.created_at }}</td>
+            <td><b>{{ r.label or r.meter_type }}</b></td>
             <td>{{ r.username }}</td>
-            <td>{{ r.meter_type }}</td>
-            <td><b>{{ r.label }}</b></td>
             <td>
+              {% if r.status %}
+                <span class="pill {{ r.status_class }}">{{ r.status }}</span>
+              {% else %}
+                <span class="small-muted">-</span>
+              {% endif %}
+            </td>
+            <td class="num">
               {% if r.value %}
                 <b>{{ r.value }}</b>
               {% else %}
@@ -103,130 +130,175 @@
             </td>
             <td>
               {% if r.filename %}
-                <a href="/uploads/{{ r.filename }}" target="_blank">Open</a>
+                <button class="btn small js-open-image" type="button" data-src="/uploads/{{ r.filename }}" {% if r.filename_2 %}data-src2="/uploads/{{ r.filename_2 }}"{% endif %}>Open</button>
+              {% else %}
+                -
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+          {% for t in task_instances %}
+          <tr data-meter="task" data-user="{{ t.assigned_username or t.assigned_user_id }}" data-label="{{ t.title }}" data-created="{{ t.submitted_at or t.deadline_at }}" data-value="{{ '' if (t.response_value|string|lower) == 'overdue' else (t.response_value or '') }}" data-status="{{ (t.status or '')|lower }}">
+            <td>{{ t.id }}</td>
+            <td>{{ t.submitted_at or t.deadline_at }}</td>
+            <td><b>{{ t.title }}</b></td>
+            <td>{{ t.assigned_username or t.assigned_user_id }}</td>
+            <td>
+              <span class="pill {% if t.status == 'overdue' %}high{% elif t.status in ['submitted','late','completed'] %}ok{% else %}low{% endif %}">
+                {{ t.status }}
+              </span>
+            </td>
+            <td class="num">
+              {% if t.response_value is not none and (t.response_value|string|lower) != 'overdue' %}
+                {{ t.response_value }}
+                {% if t.response_fuel_consumed is not none %}
+                  <div class="small-muted">{{ t.response_fuel_consumed }} L</div>
+                {% endif %}
               {% else %}
                 -
               {% endif %}
             </td>
             <td>
-              {% set o = r.ocr_obj %}
-              {% if o and o.debug_urls %}
-                <details>
-                  <summary>Show debug images</summary>
-                  <div class="imggrid">
-                    {% if o.debug_urls.yolo %}<img src="{{ o.debug_urls.yolo }}">{% endif %}
-                    {% if o.debug_urls.crop %}<img src="{{ o.debug_urls.crop }}">{% endif %}
-                    {% if o.debug_urls.prep %}<img src="{{ o.debug_urls.prep }}">{% endif %}
-                  </div>
-                </details>
+              {% if t.response_file_path and t.response_file_path.startswith('/uploads/') %}
+                <button class="btn small js-open-image" type="button" data-src="{{ t.response_file_path }}" {% if t.response_file_path_2 %}data-src2="{{ t.response_file_path_2 }}"{% endif %}>Open</button>
               {% else %}
-                <span class="small-muted">No debug</span>
+                -
               {% endif %}
-
-              <details>
-                <summary>OCR JSON</summary>
-                <pre>{{ r.ocr_json }}</pre>
-              </details>
             </td>
           </tr>
           {% endfor %}
         </tbody>
       </table>
+      </div>
 
       <script>
         document.addEventListener("DOMContentLoaded", () => {
-          setupFiltering("readingsTable", "searchReadings", "meterFilter");
+          setupFiltering("readingsTable", "searchReadings", "meterFilter", "statusFilter");
         });
       </script>
 
       {% else %}
-        <div class="small-muted">No readings uploaded for Team {{ team_id }} yet.</div>
-      {% endif %}
-    </div>
-
-    <!-- ALERTS -->
-    <div class="tab-content" data-tab-content="alerts">
-      <div id="alertsLive" data-role="coadmin" data-team="{{ team_id }}">
-        {% if alerts and alerts|length > 0 %}
-          {% for a in alerts %}
-            <div class="toast {% if a.severity == 'high' %}error{% elif a.severity == 'low' %}error{% else %}ok{% endif %}">
-              <div style="display:flex; justify-content:space-between; gap:10px; align-items:flex-start;">
-                <div>
-                  <div>
-                    <span class="pill {% if a.severity == 'high' %}high{% elif a.severity == 'low' %}low{% else %}ok{% endif %}">
-                      {{ a.severity|upper }}
-                    </span>
-                    <span style="margin-left:8px; font-weight:800;">{{ a.message }}</span>
-                  </div>
-                  <div class="small-muted">Created: {{ a.created_at }} • {% if a.is_read %}Read{% else %}Unread{% endif %}</div>
-                </div>
-                {% if not a.is_read %}
-                <form method="post" action="/alerts/{{ a.id }}/read">
-                  <button class="btn small" type="submit">Mark Read</button>
-                </form>
-                {% endif %}
-              </div>
-            </div>
-          {% endfor %}
-        {% else %}
-          <div class="small-muted">No alerts for this team yet.</div>
-        {% endif %}
-      </div>
-      <div id="coadminAutoRefresh" data-team="{{ team_id }}" data-latest-id="{{ latest_reading_id or 0 }}" style="display:none;"></div>
-    </div>
-
-    <!-- MESSAGES -->
-    <div class="tab-content" data-tab-content="messages">
-      <form method="post" action="/messages/send" class="stack" style="margin-bottom:12px;">
-        <div class="filters">
-          <select class="input" name="target_role" required>
-            <option value="admin">Admin</option>
-            <option value="user">User</option>
-          </select>
-          <select class="input" name="target_username">
-            <option value="">Select user (optional)</option>
-            {% if users_team %}
-              {% for u in users_team %}
-                {% if u.role == 'user' %}
-                  <option value="{{ u.username }}">{{ u.username }}</option>
-                {% endif %}
-              {% endfor %}
-            {% endif %}
-          </select>
+        <div class="empty-state">
+          <h3 class="empty-title">No records uploaded yet</h3>
+          <p class="empty-copy">As soon as team users upload entries or receive tasks, this table will populate automatically.</p>
         </div>
-        <input class="input" name="body" placeholder="Write a message…" required />
-        <button class="btn primary" type="submit">Send Message</button>
-      </form>
-
-      {% if messages and messages|length > 0 %}
-        {% for m in messages %}
-          <div class="toast {% if m.is_read %}ok{% else %}error{% endif %}">
-            <div style="display:flex; justify-content:space-between; gap:10px; align-items:flex-start;">
-              <div>
-                <div style="font-weight:800;">
-                  From {{ m.sender_role|upper }}{% if m.sender_username %} ({{ m.sender_username }}){% endif %}
-                </div>
-                <div class="small-muted">
-                  To {{ m.target_role|upper }}{% if m.target_user_id %} (User ID {{ m.target_user_id }}){% elif m.target_team %} (Team {{ m.target_team }}){% endif %}
-                </div>
-                <div>{{ m.body }}</div>
-                <div class="small-muted">Created: {{ m.created_at }} • {% if m.is_read %}Read{% else %}Unread{% endif %}</div>
-              </div>
-              {% if not m.is_read %}
-                <form method="post" action="/messages/{{ m.id }}/read">
-                  <button class="btn small" type="submit">Mark Read</button>
-                </form>
-              {% endif %}
-            </div>
-          </div>
-        {% endfor %}
-      {% else %}
-        <div class="small-muted">No messages yet.</div>
       {% endif %}
+      <div id="coadminAutoRefresh" data-team="{{ team_id }}" data-latest-id="{{ latest_reading_id or 0 }}" style="display:none;"></div>
     </div>
 
   </div>
 </div>
+{% set active_page = "dashboard" %}
+{% include "_partials/bottom_nav.html" %}
+{% include "_partials/alerts_modal.html" %}
+
+<!-- MODAL -->
+<div class="modal" id="modal" aria-hidden="true">
+  <div class="modal-card image-modal-card">
+    <div class="modal-head">
+      <div>
+        <div class="modal-title" id="modalTitle">Reading</div>
+        <div class="small-muted" id="modalSub"></div>
+      </div>
+      <button class="btn" type="button" id="modalClose">Done</button>
+    </div>
+
+    <div class="modal-body">
+      <div id="modalImages" class="imggrid"></div>
+    </div>
+  </div>
+</div>
+
+<!-- CHAT POPUP -->
+<div class="modal chat-modal" id="chatPopup" aria-hidden="true">
+  <div class="modal-card chat-shell">
+    <div class="modal-head">
+      <div>
+        <div class="modal-title">Open Messages</div>
+        <div class="small-muted" id="chatPresenceLine">Secure in-app chat</div>
+      </div>
+      <div style="display:flex; gap:8px;">
+        <button class="btn small" type="button" id="chatNewGroupBtn">New Group</button>
+        <button class="btn small" type="button" id="chatCloseBtn">Done</button>
+      </div>
+    </div>
+    <div class="modal-body chat-layout">
+      <aside class="chat-list-pane">
+        <div class="chat-list-head">
+          <div class="chat-page-title">Messages</div>
+          <button class="btn small" type="button" id="chatSidebarOptionsBtn">⋯</button>
+        </div>
+        <div class="chat-search-wrap">
+          <span class="chat-search-icon">🔎</span>
+          <input class="input" id="chatSearchInput" placeholder="Search messages.." />
+        </div>
+        <div class="chat-archive-row">
+          <div class="chat-archive-label" id="chatArchivedLabel">Archived messages (0)</div>
+          <button class="chat-archive-action" type="button" id="chatToggleArchivedBtn">View all</button>
+        </div>
+        <div id="chatConversations" class="chat-conversations"></div>
+      </aside>
+      <section class="chat-thread-pane">
+        <div class="chat-thread-head">
+          <div class="chat-thread-left">
+            <button class="btn small" type="button" id="chatBackBtn">←</button>
+            <div class="chat-thread-avatar" id="chatThreadAvatar">C</div>
+            <div>
+              <div id="chatThreadTitle" class="chat-thread-title">Select a conversation</div>
+              <div id="chatThreadMeta" class="small-muted"></div>
+            </div>
+          </div>
+          <button class="btn small" type="button" id="chatThreadMenuBtn">⋯</button>
+        </div>
+        <div id="chatMessages" class="chat-messages"></div>
+        <div class="chat-composer">
+          <div class="chat-composer-wrap">
+            <textarea class="input" id="chatComposerInput" placeholder="Write your message..." rows="2"></textarea>
+            <button class="chat-send-arrow" type="button" id="chatSendBtn" aria-label="Send message">➤</button>
+          </div>
+        </div>
+      </section>
+    </div>
+  </div>
+</div>
+
+<script>
+document.addEventListener("click", (e) => {
+  const btn = e.target.closest(".js-open-image");
+  if (!btn) return;
+  e.preventDefault();
+
+  const modal = document.getElementById("modal");
+  const title = document.getElementById("modalTitle");
+  const sub = document.getElementById("modalSub");
+  const images = document.getElementById("modalImages");
+  if (!modal || !title || !sub || !images) return;
+
+  const src = btn.getAttribute("data-src");
+  const src2 = btn.getAttribute("data-src2");
+  if (!src) return;
+
+  title.textContent = src2 ? "Uploaded Images" : "Uploaded Image";
+  sub.textContent = "";
+  let html = `
+    <div class="imgcard">
+      <div class="small-muted" style="margin-bottom:6px;"><b>${src2 ? "Start Image" : "Uploaded Image"}</b></div>
+      <img src="${src}" alt="Uploaded Image" />
+    </div>
+  `;
+  if (src2) {
+    html += `
+      <div class="imgcard">
+        <div class="small-muted" style="margin-bottom:6px;"><b>End Image</b></div>
+        <img src="${src2}" alt="Uploaded Image 2" />
+      </div>
+    `;
+  }
+  images.innerHTML = html;
+  modal.classList.add("open");
+  modal.setAttribute("aria-hidden", "false");
+});
+</script>
 
 </body>
 </html>
