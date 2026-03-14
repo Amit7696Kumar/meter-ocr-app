@@ -27,7 +27,7 @@
 ## Google Cloud Vision OCR (for uploaded images)
 - Install deps: `pip install -r server/requirements.txt`
 - Configure Google Vision API key:
-  - `export GCV_API_KEY=AIzaSyD1WDU2dSpcQKiXZuqPoUY_eybgvKBpR6M`
+  
 - OCR backend mode:
   - `export OCR_BACKEND=gcv_then_tesseract` (default, GCV first then local fallback)
   - `export OCR_BACKEND=gcv` (GCV only)
