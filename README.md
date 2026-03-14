@@ -32,8 +32,7 @@
   - `export OCR_BACKEND=gcv_then_tesseract` (default, GCV first then local fallback)
   - `export OCR_BACKEND=gcv` (GCV only)
   - `export OCR_BACKEND=tesseract` (local only)
-GOOGLE_CLIENT_ID=660104742711-ijiumfgscjd757bsj9pgocg42siepiai.apps.googleusercontent.com
-GOOGLE_CLIENT_SECRET=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
+
 
 
 
