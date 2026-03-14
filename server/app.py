@@ -3,6 +3,7 @@ import json
 import uuid
 import time
 import re
+import hashlib
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta
@@ -12,7 +13,7 @@ from typing import Optional, Any, Dict, List
 from fastapi import FastAPI, Request, UploadFile, Form, File
 from fastapi.exceptions import RequestValidationError
 from fastapi import HTTPException
-from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse, JSONResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse, JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
@@ -30,7 +31,9 @@ from server.db import (
     get_user_by_email,
     get_user_by_google_id,
     update_user_identity,
+    update_user_username,
     update_user_password,
+    set_user_force_password_change,
     update_user_team,
     insert_reading,
     fetch_readings_all,
@@ -86,10 +89,13 @@ from server.db import (
     task_get_latest_instance_for_user,
     task_create_notification,
     task_log_activity,
+    task_upsert_ai_result,
 )
 
 #  use warmup + run_ocr from ocr_engine
-from server.ocr_engine import run_ocr, warmup_models, detect_fire_fighting_equipment
+from server.ocr_engine import run_ocr, warmup_models
+from server.object_detection import detect_task_objects
+from server.openai_ai import analyze_task_image_with_openai, openai_available
 from server.logging_utils import (
     setup_logging,
     get_logger,
@@ -147,8 +153,10 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
 TEMPLATE_DIR = os.path.join(BASE_DIR, "templates")
 STATIC_DIR = os.path.join(BASE_DIR, "static")
+PREVIEW_DIR = os.path.join(UPLOAD_DIR, "_previews")
 
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+os.makedirs(PREVIEW_DIR, exist_ok=True)
 
 IDEAL_PATH = os.path.join(BASE_DIR, "ideal_values.json")
 
@@ -170,14 +178,112 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
 
 templates = Jinja2Templates(directory=TEMPLATE_DIR)
-templates.env.globals["static_version"] = str(int(time.time()))
+
+
+def _current_static_version() -> str:
+    static_root = Path(STATIC_DIR)
+    paths = [
+        static_root / "app.css",
+        static_root / "app.js",
+        static_root / "sw.js",
+    ]
+    latest_mtime = 0
+    for path in paths:
+        try:
+            latest_mtime = max(latest_mtime, int(path.stat().st_mtime))
+        except OSError:
+            continue
+    return str(latest_mtime or int(time.time()))
+
+
+templates.env.globals["static_version"] = _current_static_version()
+
+
+def _resolve_upload_url_path(src: str) -> Optional[Path]:
+    raw = (src or "").strip()
+    if not raw:
+        return None
+    parsed = urllib.parse.urlparse(raw)
+    path = urllib.parse.unquote(parsed.path or "")
+    if not path.startswith("/uploads/"):
+        return None
+    rel = path[len("/uploads/"):].lstrip("/")
+    if not rel or rel.startswith("_previews/"):
+        return None
+    candidate = (Path(UPLOAD_DIR) / rel).resolve()
+    uploads_root = Path(UPLOAD_DIR).resolve()
+    try:
+        candidate.relative_to(uploads_root)
+    except ValueError:
+        return None
+    return candidate if candidate.is_file() else None
+
+
+def _build_preview_cache_path(source_path: Path) -> Path:
+    rel = source_path.resolve().relative_to(Path(UPLOAD_DIR).resolve())
+    digest = hashlib.sha1(str(rel).encode("utf-8")).hexdigest()[:12]
+    preview_name = f"{source_path.stem}.{digest}.jpg"
+    return (Path(PREVIEW_DIR) / rel.parent / preview_name).resolve()
+
+
+def _generate_cached_preview(source_path: Path) -> Optional[Path]:
+    if source_path.suffix.lower() not in {".jpg", ".jpeg", ".png", ".webp"}:
+        return None
+
+    preview_path = _build_preview_cache_path(source_path)
+    preview_path.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        if preview_path.exists() and preview_path.stat().st_mtime >= source_path.stat().st_mtime:
+            return preview_path
+    except OSError:
+        pass
+
+    try:
+        import cv2  # Lazy import to avoid startup-time dependency failures.
+    except Exception:
+        return None
+
+    image = cv2.imread(str(source_path))
+    if image is None:
+        return None
+
+    height, width = image.shape[:2]
+    max_dim = 1400
+    largest_side = max(height, width)
+    if largest_side > max_dim:
+        scale = max_dim / float(largest_side)
+        image = cv2.resize(
+            image,
+            (max(1, int(width * scale)), max(1, int(height * scale))),
+            interpolation=cv2.INTER_AREA,
+        )
+
+    ok, encoded = cv2.imencode(".jpg", image, [int(cv2.IMWRITE_JPEG_QUALITY), 72])
+    if not ok:
+        return None
+
+    tmp_path = preview_path.with_suffix(".tmp")
+    tmp_path.write_bytes(encoded.tobytes())
+    os.replace(tmp_path, preview_path)
+    return preview_path
 
 
 @app.middleware("http")
 async def request_logging_middleware(request: Request, call_next):
+    templates.env.globals["static_version"] = _current_static_version()
+    path = request.url.path
+    session = request.scope.get("session") or {}
+    uid = session.get("uid")
+    if uid:
+        user = get_user_by_id(int(uid))
+        if _must_rotate_password(user):
+            allowed_paths = {"/force-password-change", "/logout", "/login"}
+            if not (path in allowed_paths or path.startswith("/static/")):
+                return RedirectResponse("/force-password-change", status_code=303)
     request_id = request.headers.get("X-Request-Id") or uuid.uuid4().hex
     method = request.method
-    route = request.url.path
+    route = path
     ip = request.client.host if request.client else None
     started = time.perf_counter()
     user_agent = request.headers.get("user-agent", "")
@@ -369,6 +475,24 @@ def _auth_page(request: Request, error: Optional[str] = None, info: Optional[str
     )
 
 
+def _must_rotate_password(user: Optional[Dict[str, Any]]) -> bool:
+    if not user:
+        return False
+    return user.get("role") in {"admin", "coadmin"} and bool(int(user.get("force_password_change") or 0))
+
+
+def _password_change_page(request: Request, user: Dict[str, Any], error: Optional[str] = None, info: Optional[str] = None):
+    return templates.TemplateResponse(
+        "force_password_change.html",
+        {
+            "request": request,
+            "user": user,
+            "error": error or request.query_params.get("error"),
+            "info": info or request.query_params.get("info"),
+        },
+    )
+
+
 def _google_redirect_uri(request: Request) -> str:
     env_uri = (os.getenv("GOOGLE_REDIRECT_URI", "") or "").strip()
     if env_uri:
@@ -464,28 +588,59 @@ async def _task_process_ai(
     engine = (ai_engine_type or "auto").strip().lower()
     if file_type == "photo":
         try:
-            debug_id = uuid.uuid4().hex
-            task_text = f"{instance.get('title') or ''} {instance.get('description') or ''}".lower()
-            meter_hint = "earthing" if "earthing" in task_text else None
-            ocr = await run_in_threadpool(run_ocr, upload_full_path, debug_id, meter_hint)
+            mode_hint = _task_ai_mode_hint(instance)
+            openai_payload = None
             extracted_text = ""
             value = None
-            if isinstance(ocr, dict):
-                num = (ocr.get("numeric") or {})
-                if isinstance(num, dict):
-                    value = num.get("value")
-                extracted_text = (ocr.get("text") or "").strip()
-            if value in {None, ""} and extracted_text:
-                m = re.search(r"-?\d+(?:\.\d+)?", extracted_text)
-                if m:
-                    value = m.group(0)
-            summary = f"AI ({engine}) completed; value={value}" if value else f"AI ({engine}) completed; no numeric value extracted"
+            engine_used = "openai"
+            if openai_available():
+                try:
+                    openai_payload = await run_in_threadpool(
+                        analyze_task_image_with_openai,
+                        image_path=upload_full_path,
+                        task_title=str(instance.get("title") or ""),
+                        task_description=str(instance.get("description") or ""),
+                        local_result={},
+                        mode_hint=mode_hint,
+                    )
+                    openai_value = openai_payload.get("value")
+                    if openai_value not in {None, ""}:
+                        value = openai_value
+                    extracted_text = str(openai_payload.get("summary") or "").strip()
+                except Exception as e:
+                    openai_payload = {"error": str(e), "engine_used": "openai"}
+
+            ocr = {}
+            local_confidence = 0.0
+            if value in {None, ""}:
+                debug_id = uuid.uuid4().hex
+                task_text = f"{instance.get('title') or ''} {instance.get('description') or ''}".lower()
+                meter_hint = "earthing" if "earthing" in task_text else None
+                ocr = await run_in_threadpool(run_ocr, upload_full_path, debug_id, meter_hint)
+                engine_used = "local_fallback"
+                if isinstance(ocr, dict):
+                    num = (ocr.get("numeric") or {})
+                    if isinstance(num, dict):
+                        value = num.get("value")
+                        try:
+                            local_confidence = float(num.get("confidence") or 0.0)
+                        except Exception:
+                            local_confidence = 0.0
+                    extracted_text = extracted_text or (ocr.get("text") or "").strip()
+                if value in {None, ""} and extracted_text:
+                    m = re.search(r"-?\d+(?:\.\d+)?", extracted_text)
+                    if m:
+                        value = m.group(0)
+
+            summary = f"AI ({engine_used}) completed; value={value}" if value else f"AI ({engine_used}) completed; no numeric value extracted"
             return {
                 "status": "completed",
                 "summary": summary,
                 "extracted_text": extracted_text,
                 "extracted_values": {"value": value} if value is not None else {},
-                "engine_used": engine,
+                "engine_used": engine_used,
+                "local_result": ocr,
+                "openai_result": openai_payload,
             }
         except Exception as e:
             return {"status": "failed", "summary": f"AI ({engine}) failed: {e}", "engine_used": engine}
@@ -509,6 +664,39 @@ def _task_float(value: Any) -> Optional[float]:
         return None
 
 
+def _task_ai_mode_hint(instance: Dict[str, Any]) -> str:
+    task_text = f"{instance.get('title') or ''} {instance.get('description') or ''}".strip().lower()
+    qtype = (instance.get("question_type") or "upload").strip().lower()
+    if qtype in {"number", "upload_number"}:
+        return "numeric"
+    if any(token in task_text for token in ["fire point", "firepoint", "fire fighting", "firefighting", "extinguisher", "hydrant", "fire bucket"]):
+        return "present_absent"
+    if (
+        ("socket" in task_text and "plug" in task_text)
+        or "correct" in task_text
+        or "incorrect" in task_text
+        or "properly plugged" in task_text
+        or "proper connection" in task_text
+    ):
+        return "correct_incorrect"
+    return "auto"
+
+
+def _task_semantic_alert_reason(instance: Dict[str, Any], response_value: Any) -> Optional[str]:
+    if response_value is None:
+        return None
+    value = str(response_value).strip().lower()
+    if not value:
+        return None
+    mode_hint = _task_ai_mode_hint(instance)
+    title = str(instance.get("title") or "").strip() or "task"
+    if mode_hint == "correct_incorrect" and value == "incorrect":
+        return f"Task alert: Response marked Incorrect for task '{title}'."
+    if mode_hint == "present_absent" and value == "absent":
+        return f"Task alert: Required item absent for task '{title}'."
+    return None
+
+
 def _task_numeric_from_ocr(ocr_payload: Optional[Dict[str, Any]]) -> Optional[float]:
     if not isinstance(ocr_payload, dict):
         return None
@@ -524,6 +712,58 @@ def _task_numeric_from_ocr(ocr_payload: Optional[Dict[str, Any]]) -> Optional[fl
         return None
     try:
         return float(m.group(0))
+    except Exception:
+        return None
+
+
+async def _task_openai_numeric_fallback(
+    *,
+    image_path: str,
+    task_title: str,
+    task_description: str,
+    local_result: Optional[Dict[str, Any]] = None,
+) -> Optional[float]:
+    if not openai_available():
+        return None
+    try:
+        payload = await run_in_threadpool(
+            analyze_task_image_with_openai,
+            image_path=image_path,
+            task_title=task_title,
+            task_description=task_description,
+            local_result=local_result,
+            mode_hint="numeric",
+        )
+        raw = payload.get("value")
+        if raw is None or str(raw).strip() == "":
+            return None
+        return float(raw)
+    except Exception:
+        return None
+
+
+async def _task_openai_numeric_first(
+    *,
+    image_path: str,
+    task_title: str,
+    task_description: str,
+    local_result: Optional[Dict[str, Any]] = None,
+) -> Optional[float]:
+    if not openai_available():
+        return None
+    try:
+        payload = await run_in_threadpool(
+            analyze_task_image_with_openai,
+            image_path=image_path,
+            task_title=task_title,
+            task_description=task_description,
+            local_result=local_result,
+            mode_hint="numeric",
+        )
+        raw = payload.get("value")
+        if raw is None or str(raw).strip() == "":
+            return None
+        return float(raw)
     except Exception:
         return None
 
@@ -784,21 +1024,21 @@ def startup():
 
     # create users...
     if not get_user_by_username("admin"):
-        create_user("admin", hash_password("admin123"), "admin", None)
+        create_user("admin", hash_password("admin123"), "admin", None, force_password_change=True)
         log_event(auth_logger, "INFO", "USER_REGISTER_SUCCESS", "Bootstrap admin account created", username="admin", role="admin")
 
     for t in range(1, 7):
         uname = f"coadmin{t}"
         if not get_user_by_username(uname):
-            create_user(uname, hash_password("coadmin123"), "coadmin", t)
+            create_user(uname, hash_password("coadmin123"), "coadmin", t, force_password_change=True)
             log_event(auth_logger, "INFO", "USER_REGISTER_SUCCESS", "Bootstrap coadmin account created", username=uname, role="coadmin", team=t)
 
-    for t in range(1, 7):
-        for i in range(1, 9):
-            uname = f"user{t}{i}"
-            if not get_user_by_username(uname):
-                create_user(uname, hash_password("user123"), "user", t)
-                log_event(auth_logger, "DEBUG", "USER_REGISTER_SUCCESS", "Bootstrap user account created", username=uname, role="user", team=t)
+    bootstrap_users = [("admin", "admin123")]
+    bootstrap_users.extend((f"coadmin{t}", "coadmin123") for t in range(1, 7))
+    for uname, default_password in bootstrap_users:
+        existing = get_user_by_username(uname)
+        if existing and verify_password(default_password, str(existing.get("password_hash") or "")):
+            set_user_force_password_change(int(existing["id"]), True)
 
     log_event(system_logger, "INFO", "SYSTEM_READY", "Application startup completed", url="http://127.0.0.1:8000/login")
     if _env_flag("ENABLE_TASK_SCHEDULER", default=True):
@@ -831,6 +1071,17 @@ async def do_login(request: Request, username: str = Form(...), password: str = 
     request.session["uid"] = int(u["id"])
     role = u["role"]
     log_event(auth_logger, "INFO", "AUTH_LOGIN_SUCCESS", "Login successful", user_id=int(u["id"]), role=role)
+
+    if _must_rotate_password(u):
+        log_event(
+            auth_logger,
+            "INFO",
+            "AUTH_PASSWORD_ROTATION_REQUIRED",
+            "Login accepted with one-time password; password rotation required",
+            user_id=int(u["id"]),
+            role=role,
+        )
+        return RedirectResponse("/force-password-change", status_code=303)
 
     if role == "admin":
         return RedirectResponse("/admin", status_code=303)
@@ -903,12 +1154,72 @@ async def forgot_password(
         return _auth_page(request, error="Account not found.")
 
     try:
-        update_user_password(int(user["id"]), hash_password(new_password))
+        clear_force_change = user.get("role") in {"admin", "coadmin"}
+        update_user_password(int(user["id"]), hash_password(new_password), force_password_change=False if clear_force_change else None)
         log_event(auth_logger, "INFO", "AUTH_PASSWORD_RESET", "Password reset completed", user_id=int(user["id"]))
         return RedirectResponse("/login?info=Password reset successful. Please sign in.", status_code=303)
     except Exception:
         log_event(auth_logger, "ERROR", "AUTH_PASSWORD_RESET_FAIL", "Password reset failed", exc_info=True, identifier=ident)
         return _auth_page(request, error="Unable to reset password right now.")
+
+
+@app.get("/force-password-change", response_class=HTMLResponse)
+def force_password_change_page(request: Request):
+    u = current_user(request)
+    if not u:
+        return RedirectResponse("/login", status_code=303)
+    if not _must_rotate_password(u):
+        if u["role"] == "admin":
+            return RedirectResponse("/admin", status_code=303)
+        if u["role"] == "coadmin":
+            return RedirectResponse(f"/coadmin/{u['team']}", status_code=303)
+        return RedirectResponse("/", status_code=303)
+    return _password_change_page(request, u)
+
+
+@app.post("/force-password-change")
+async def force_password_change_submit(
+    request: Request,
+    new_password: str = Form(...),
+    confirm_password: str = Form(...),
+):
+    u = current_user(request)
+    if not u:
+        return RedirectResponse("/login", status_code=303)
+    if not _must_rotate_password(u):
+        return RedirectResponse("/login", status_code=303)
+    if len(new_password or "") < 6:
+        return _password_change_page(request, u, error="Password must be at least 6 characters.")
+    if new_password != confirm_password:
+        return _password_change_page(request, u, error="Password and confirm password do not match.")
+
+    default_password = "admin123" if u["role"] == "admin" else "coadmin123"
+    if new_password == default_password:
+        return _password_change_page(request, u, error="Choose a new password different from the one-time password.")
+
+    try:
+        update_user_password(int(u["id"]), hash_password(new_password), force_password_change=False)
+        log_event(
+            auth_logger,
+            "INFO",
+            "AUTH_PASSWORD_ROTATED",
+            "One-time password rotated successfully",
+            user_id=int(u["id"]),
+            role=u["role"],
+        )
+        request.session.clear()
+        return RedirectResponse("/login?info=Password changed successfully. Please sign in again with your new password.", status_code=303)
+    except Exception:
+        log_event(
+            auth_logger,
+            "ERROR",
+            "AUTH_PASSWORD_ROTATION_FAIL",
+            "Failed to rotate one-time password",
+            exc_info=True,
+            user_id=int(u["id"]),
+            role=u["role"],
+        )
+        return _password_change_page(request, u, error="Unable to change password right now.")
 
 
 @app.get("/auth/google/start")
@@ -1176,26 +1487,27 @@ async def upload_meter_image(
         with open(filepath_2, "wb") as f:
             f.write(await image2.read())
 
-    #  OCR in threadpool so request doesn't feel "stuck"
-    debug_id = uuid.uuid4().hex
-    try:
-        ocr_result = await run_in_threadpool(run_ocr, filepath, debug_id, meter_type)
-    except Exception as e:
-        log_event(error_logger, "ERROR", "OCR_RUN_FAIL", "OCR processing failed", error=str(e), filename=filename)
-        return templates.TemplateResponse(
-            "user.html",
-            {
-                "request": request,
-                "user": u,
-                "readings": _augment_readings(_filter_today_readings(fetch_readings_by_user(int(u["id"])))),
-                "error": f"OCR failed: {e}",
-            },
-            status_code=500,
-        )
-
+    ocr_result: Dict[str, Any] = {}
     numeric_value: Optional[str] = None
-    if ocr_result.get("numeric"):
-        numeric_value = ocr_result["numeric"].get("value")
+    if meter_type != "fire_point":
+        # OCR in threadpool so request doesn't feel "stuck"
+        debug_id = uuid.uuid4().hex
+        try:
+            ocr_result = await run_in_threadpool(run_ocr, filepath, debug_id, meter_type)
+        except Exception as e:
+            log_event(error_logger, "ERROR", "OCR_RUN_FAIL", "OCR processing failed", error=str(e), filename=filename)
+            return templates.TemplateResponse(
+                "user.html",
+                {
+                    "request": request,
+                    "user": u,
+                    "readings": _augment_readings(_filter_today_readings(fetch_readings_by_user(int(u["id"])))),
+                    "error": f"OCR failed: {e}",
+                },
+                status_code=500,
+            )
+        if ocr_result.get("numeric"):
+            numeric_value = ocr_result["numeric"].get("value")
 
     manual_value = (manual_value or "").strip() or None
     value_for_alert = manual_value or numeric_value
@@ -1272,12 +1584,34 @@ async def upload_meter_image(
             )
     elif meter_type == "fire_point":
         try:
-            fire_detection = await run_in_threadpool(detect_fire_fighting_equipment, filepath)
+            fire_detection = None
+            if openai_available():
+                try:
+                    openai_fire = await run_in_threadpool(
+                        analyze_task_image_with_openai,
+                        image_path=filepath,
+                        task_title=label.strip() or "Fire Point Check",
+                        task_description="Check whether fire fighting equipment is present in the image.",
+                        local_result={},
+                        mode_hint="present_absent",
+                    )
+                    if openai_fire.get("present") is not None:
+                        fire_detection = {
+                            "present": bool(openai_fire.get("present")),
+                            "confidence": float(openai_fire.get("confidence") or 0.0),
+                            "source": "openai",
+                            "openai_result": openai_fire,
+                        }
+                except Exception as e:
+                    fire_detection = {"openai_error": str(e)}
+            if fire_detection is None or fire_detection.get("present") is None:
+                local_detection = await run_in_threadpool(detect_task_objects, "fire_point", filepath)
+                fire_detection = {**(fire_detection or {}), **local_detection}
             fire_point_present = bool(fire_detection.get("present"))
-            fire_point_value = "Present" if fire_point_present else "Not Present"
+            fire_point_value = "Present" if fire_point_present else "Absent"
             numeric_value = None
             value_for_alert = fire_point_value
-            ocr_payload = {**ocr_result, "fire_point": fire_detection}
+            ocr_payload = {"object_detection": fire_detection}
         except Exception as e:
             log_event(error_logger, "ERROR", "FIREPOINT_DETECT_FAIL", "Fire point detection failed", error=str(e), filename=filename)
             return templates.TemplateResponse(
@@ -1356,7 +1690,7 @@ async def upload_meter_image(
             severity=severity,
         )
     if meter_type == "fire_point" and fire_point_present is False:
-        alert_text = f"Team {u['team']} - {label.strip()}: Fire fighting equipment NOT detected."
+        alert_text = f"Team {u['team']} - {label.strip()}: Fire fighting equipment absent."
         create_alert(
             reading_id=rid,
             target_role="coadmin",
@@ -1623,7 +1957,7 @@ async def tasks_submit(
 
     qtype = (item.get("question_type") or "upload").strip().lower()
     allowed_types = [x for x in _task_parse_json_list(item.get("allowed_types_json")) if x in TASK_ALLOWED_TYPES]
-    number_value: Optional[float] = None
+    number_value: Optional[Any] = None
     if (entered_number or "").strip():
         try:
             number_value = float((entered_number or "").strip())
@@ -1654,6 +1988,9 @@ async def tasks_submit(
     task_text = f"{item.get('title') or ''} {item.get('description') or ''}".lower()
     is_odometer_task = "odometer" in task_text
     is_earthing_task = "earthing" in task_text
+    is_fire_point_task = any(token in task_text for token in ["fire point", "firepoint", "fire_point", "fire safety", "firefighting"])
+    fire_point_present: Optional[bool] = None
+    fire_point_value: Optional[str] = None
 
     if is_odometer_task:
         if not response_file_start or not response_file_start.filename or not response_file_end or not response_file_end.filename:
@@ -1721,20 +2058,63 @@ async def tasks_submit(
     ai_requested = bool(item.get("ai_enabled"))
     ai_status = "not_requested"
     ai_result = None
+    ai_payload: Optional[Dict[str, Any]] = None
     extracted_value: Optional[float] = None
-    should_run_ai = bool(full_path and detected_type in {"photo", "video"} and (ai_requested or is_earthing_task or is_odometer_task))
+    should_run_ai = bool(
+        full_path
+        and detected_type in {"photo", "video"}
+        and (ai_requested or is_earthing_task or is_odometer_task)
+        and (not is_fire_point_task)
+    )
     if is_odometer_task and full_path and full_path_2:
         ai_status = "completed"
         try:
             o1 = await run_in_threadpool(run_ocr, full_path, uuid.uuid4().hex, "odometer")
             o2 = await run_in_threadpool(run_ocr, full_path_2, uuid.uuid4().hex, "odometer")
-            start_val = _task_numeric_from_ocr(o1)
-            end_val = _task_numeric_from_ocr(o2)
+            start_val = await _task_openai_numeric_first(
+                image_path=full_path,
+                task_title=f"{item.get('title') or ''} start",
+                task_description=str(item.get("description") or ""),
+                local_result={"ocr": o1, "position": "start"},
+            )
+            end_val = await _task_openai_numeric_first(
+                image_path=full_path_2,
+                task_title=f"{item.get('title') or ''} end",
+                task_description=str(item.get("description") or ""),
+                local_result={"ocr": o2, "position": "end"},
+            )
+            if start_val is None:
+                start_val = _task_numeric_from_ocr(o1)
+            if end_val is None:
+                end_val = _task_numeric_from_ocr(o2)
+            if start_val is None:
+                start_val = await _task_openai_numeric_fallback(
+                    image_path=full_path,
+                    task_title=f"{item.get('title') or ''} start",
+                    task_description=str(item.get("description") or ""),
+                    local_result={"ocr": o1, "position": "start"},
+                )
+            if end_val is None:
+                end_val = await _task_openai_numeric_fallback(
+                    image_path=full_path_2,
+                    task_title=f"{item.get('title') or ''} end",
+                    task_description=str(item.get("description") or ""),
+                    local_result={"ocr": o2, "position": "end"},
+                )
             if start_val is None or end_val is None:
                 raise ValueError("Could not extract start/end odometer values")
             distance_diff_val = abs(end_val - start_val)
             fuel_consumed_val = distance_diff_val / float(avg_kmpl_val or 1.0)
             number_value = distance_diff_val
+            ai_payload = {
+                "engine_used": "openai_then_local",
+                "extracted_values": {
+                    "start": start_val,
+                    "end": end_val,
+                    "distance": distance_diff_val,
+                    "fuel_consumed": fuel_consumed_val,
+                },
+            }
             ai_result = (
                 f"Odometer processed: start={start_val:.2f}, end={end_val:.2f}, "
                 f"distance={distance_diff_val:.2f} km, avg_kmpl={avg_kmpl_val:.2f}, "
@@ -1743,20 +2123,64 @@ async def tasks_submit(
         except Exception as e:
             ai_status = "failed"
             ai_result = f"Odometer processing failed: {e}"
+    elif is_fire_point_task and full_path:
+        try:
+            fire_detection = None
+            if openai_available():
+                try:
+                    openai_fire = await run_in_threadpool(
+                        analyze_task_image_with_openai,
+                        image_path=full_path,
+                        task_title=str(item.get("title") or ""),
+                        task_description=str(item.get("description") or ""),
+                        local_result={},
+                        mode_hint="present_absent",
+                    )
+                    if openai_fire.get("present") is not None:
+                        fire_detection = {
+                            "openai_result": openai_fire,
+                            "present": bool(openai_fire.get("present")),
+                            "confidence": float(openai_fire.get("confidence") or 0.0),
+                            "source": "openai",
+                        }
+                except Exception as e:
+                    fire_detection = {"openai_error": str(e)}
+            if fire_detection is None or fire_detection.get("present") is None:
+                local_fire = await run_in_threadpool(detect_task_objects, "fire_point", full_path)
+                fire_detection = {**(fire_detection or {}), **local_fire}
+            fire_point_present = bool(fire_detection.get("present"))
+            fire_point_value = "Present" if fire_point_present else "Absent"
+            number_value = fire_point_value
+            ai_status = "completed"
+            ai_payload = fire_detection
+            ai_result = (
+                f"Fire-point detection ({fire_detection.get('source') or 'model'}): "
+                f"{fire_point_value}"
+            )
+        except Exception as e:
+            fire_point_present = False
+            fire_point_value = "Absent"
+            number_value = fire_point_value
+            ai_status = "failed"
+            ai_result = f"Fire-point detection failed: {e}"
     elif should_run_ai:
         ai_status = "queued"
         ai_payload = await _task_process_ai(item, full_path, detected_type)
         ai_status = ai_payload.get("status") or "failed"
         ai_result = ai_payload.get("summary")
-        try:
-            extracted_raw = ((ai_payload or {}).get("extracted_values") or {}).get("value")
-            if extracted_raw is not None and extracted_raw != "":
+        extracted_raw = ((ai_payload or {}).get("extracted_values") or {}).get("value")
+        if extracted_raw is not None and extracted_raw != "":
+            try:
                 extracted_value = float(extracted_raw)
-        except Exception:
-            extracted_value = None
+            except Exception:
+                if number_value is None:
+                    number_value = str(extracted_raw)
+                extracted_value = None
 
-    if number_value is None and extracted_value is not None and is_earthing_task:
+    if number_value is None and extracted_value is not None:
         number_value = extracted_value
+
+    semantic_alert_reason = _task_semantic_alert_reason(item, number_value)
 
     task_upsert_submission(
         task_instance_id=int(instance_id),
@@ -1774,6 +2198,20 @@ async def tasks_submit(
         ai_status=ai_status,
         ai_result_reference=ai_result,
     )
+    try:
+        task_upsert_ai_result(
+            task_instance_id=int(instance_id),
+            ai_engine_type=str((ai_payload or {}).get("engine_used") or ("local" if is_fire_point_task or is_odometer_task else "none")),
+            processing_status=ai_status,
+            extracted_text=str((ai_payload or {}).get("extracted_text") or ai_result or ""),
+            extracted_values=(ai_payload or {}).get("extracted_values") or ({"value": number_value} if number_value is not None else {}),
+            analysis_summary=ai_result,
+            validation_status="completed" if ai_status == "completed" else ai_status,
+            alert_triggered=bool((is_fire_point_task and fire_point_present is False) or semantic_alert_reason),
+            alert_reason=(f"Fire fighting equipment absent for task '{item.get('title')}'." if is_fire_point_task and fire_point_present is False else semantic_alert_reason),
+        )
+    except Exception:
+        pass
     try:
         deadline = datetime.fromisoformat(str(item.get("deadline_at")))
     except Exception:
@@ -1793,6 +2231,26 @@ async def tasks_submit(
                     ),
                     severity="high",
                 )
+        except Exception:
+            pass
+
+    if is_fire_point_task and fire_point_present is False:
+        try:
+            _task_send_submission_alert(
+                item,
+                f"Task alert: Fire fighting equipment absent for task '{item.get('title')}'.",
+                severity="high",
+            )
+        except Exception:
+            pass
+
+    if semantic_alert_reason:
+        try:
+            _task_send_submission_alert(
+                item,
+                semantic_alert_reason,
+                severity="high",
+            )
         except Exception:
             pass
 
@@ -1901,6 +2359,26 @@ def admin_page(request: Request):
     )
 
 
+@app.get("/api/uploads/preview")
+def upload_preview(request: Request, src: str):
+    u = current_user(request)
+    if not require_role(u, ["user", "coadmin", "admin"]):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    source_path = _resolve_upload_url_path(src)
+    if source_path is None:
+        raise HTTPException(status_code=404, detail="Image not found")
+
+    preview_path = _generate_cached_preview(source_path)
+    target_path = preview_path or source_path
+    media_type = "image/jpeg" if preview_path else None
+    return FileResponse(
+        path=target_path,
+        media_type=media_type,
+        headers={"Cache-Control": "private, max-age=86400"},
+    )
+
+
 @app.get("/teams", response_class=HTMLResponse)
 def teams_page(request: Request):
     u = current_user(request)
@@ -1987,11 +2465,18 @@ def settings_page(request: Request):
 
     if u["role"] == "admin":
         unread = count_unread_admin()
+        team_members: List[Dict[str, Any]] = []
+        for team_no in [1, 2, 3, 4, 5, 6]:
+            for member in fetch_users_by_team(team_no):
+                if member.get("role") == "user":
+                    team_members.append(member)
     elif u["role"] == "coadmin":
         team_id = int(_user_team_int(u) or 0)
         unread = count_unread_coadmin(team_id) if team_id > 0 else 0
+        team_members = [member for member in fetch_users_by_team(team_id) if member.get("role") == "user"] if team_id > 0 else []
     else:
         unread = 0
+        team_members = []
 
     return templates.TemplateResponse(
         "settings.html",
@@ -2000,9 +2485,87 @@ def settings_page(request: Request):
             "user": u,
             "unread_count": unread,
             "unassigned_users": fetch_users_without_team(),
+            "team_members": team_members,
             "available_teams": [1, 2, 3, 4, 5, 6],
         },
     )
+
+
+@app.post("/settings/username")
+async def settings_update_username(
+    request: Request,
+    username: str = Form(...),
+):
+    u = current_user(request)
+    if not require_role(u, ["user", "coadmin", "admin"]):
+        return RedirectResponse("/login", status_code=303)
+
+    new_username = (username or "").strip()
+    if not new_username:
+        return RedirectResponse("/settings?err=Username is required.", status_code=303)
+
+    existing = get_user_by_username(new_username)
+    if existing and int(existing["id"]) != int(u["id"]):
+        return RedirectResponse("/settings?err=Username already exists.", status_code=303)
+
+    try:
+        update_user_username(int(u["id"]), new_username)
+        log_event(
+            auth_logger,
+            "INFO",
+            "ACCOUNT_USERNAME_UPDATED",
+            "Username updated from settings",
+            user_id=int(u["id"]),
+        )
+        return RedirectResponse("/settings?info=Username updated successfully.", status_code=303)
+    except Exception:
+        log_event(
+            auth_logger,
+            "ERROR",
+            "ACCOUNT_USERNAME_UPDATE_FAIL",
+            "Failed to update username from settings",
+            exc_info=True,
+            user_id=int(u["id"]),
+        )
+        return RedirectResponse("/settings?err=Unable to update username right now.", status_code=303)
+
+
+@app.post("/settings/password")
+async def settings_update_password(
+    request: Request,
+    new_password: str = Form(...),
+    confirm_password: str = Form(...),
+):
+    u = current_user(request)
+    if not require_role(u, ["user", "coadmin", "admin"]):
+        return RedirectResponse("/login", status_code=303)
+
+    if len(new_password or "") < 6:
+        return RedirectResponse("/settings?err=Password must be at least 6 characters.", status_code=303)
+    if new_password != confirm_password:
+        return RedirectResponse("/settings?err=Password and confirm password do not match.", status_code=303)
+
+    try:
+        clear_force = u.get("role") in {"admin", "coadmin"}
+        update_user_password(int(u["id"]), hash_password(new_password), force_password_change=False if clear_force else None)
+        log_event(
+            auth_logger,
+            "INFO",
+            "ACCOUNT_PASSWORD_UPDATED",
+            "Password updated from settings",
+            user_id=int(u["id"]),
+        )
+        return RedirectResponse("/settings?info=Password updated successfully.", status_code=303)
+    except Exception:
+        log_event(
+            auth_logger,
+            "ERROR",
+            "ACCOUNT_PASSWORD_UPDATE_FAIL",
+            "Failed to update password from settings",
+            exc_info=True,
+            user_id=int(u["id"]),
+        )
+        return RedirectResponse("/settings?err=Unable to update password right now.", status_code=303)
 
 
 @app.post("/team-members/add")
@@ -2125,6 +2688,64 @@ async def team_members_assign(
             assigned_user_id=uid,
         )
         return _redirect_dashboard_with_message(u, err="Unable to assign member right now.")
+
+
+@app.post("/team-members/remove")
+async def team_members_remove(
+    request: Request,
+    user_id: str = Form(...),
+):
+    u = current_user(request)
+    if not require_role(u, ["admin", "coadmin"]):
+        return RedirectResponse("/login", status_code=303)
+
+    try:
+        uid = int((user_id or "").strip())
+    except Exception:
+        return _redirect_dashboard_with_message(u, err="Select a valid user.")
+
+    target_user = get_user_by_id(uid)
+    if not target_user or target_user.get("role") != "user":
+        return _redirect_dashboard_with_message(u, err="Selected user is invalid.")
+
+    target_team = _user_team_int(target_user)
+    if target_team is None or target_team <= 0:
+        return _redirect_dashboard_with_message(u, err="Selected user is not assigned to any team.")
+
+    if u["role"] == "coadmin":
+        actor_team = int(_user_team_int(u) or 0)
+        if actor_team <= 0 or actor_team != int(target_team):
+            return _redirect_dashboard_with_message(u, err="You can remove members only from your own team.")
+
+    try:
+        update_user_team(uid, None)
+        provider_now = str(target_user.get("auth_provider") or "")
+        if provider_now.endswith("_assigned"):
+            update_user_identity(int(uid), auth_provider=provider_now.replace("_assigned", ""))
+        display_name = (target_user.get("display_name") or "").strip() or target_user.get("username") or str(uid)
+        log_event(
+            admin_logger,
+            "INFO",
+            "TEAM_MEMBER_REMOVE",
+            "User removed from team",
+            by_user_id=int(u["id"]),
+            removed_user_id=uid,
+            team=target_team,
+        )
+        return _redirect_dashboard_with_message(
+            u,
+            info=f"Member {display_name} removed from Team {target_team}.",
+        )
+    except Exception:
+        log_event(
+            error_logger,
+            "ERROR",
+            "TEAM_MEMBER_REMOVE_FAIL",
+            "Failed to remove team member",
+            exc_info=True,
+            removed_user_id=uid,
+        )
+        return _redirect_dashboard_with_message(u, err="Unable to remove member right now.")
 
 
 # -----------------------
@@ -2440,7 +3061,13 @@ def api_chat_bootstrap(request: Request):
     )
     log_event(chat_logger, "DEBUG", "CHAT_BOOTSTRAP", "Chat bootstrap fetched", user_id=int(u["id"]), users=len(picker))
     return {
-        "me": {"id": int(u["id"]), "username": u["username"], "role": u["role"], "team": u.get("team")},
+        "me": {
+            "id": int(u["id"]),
+            "username": u["username"],
+            "display_name": (u.get("display_name") or "").strip() or u["username"],
+            "role": u["role"],
+            "team": u.get("team"),
+        },
         "users": picker,
     }
 

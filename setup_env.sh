@@ -55,7 +55,10 @@ pip install --no-cache-dir \
 # 5. Install YOLO + EasyOCR
 # ----------------------------
 echo "Installing Ultralytics YOLO"
-pip install --no-cache-dir ultralytics==8.2.103
+pip install --no-cache-dir ultralytics==8.4.21
+
+echo "Installing OpenAI SDK"
+pip install --no-cache-dir openai==2.26.0
 
 echo "Installing EasyOCR"
 pip install --no-cache-dir easyocr==1.7.1

@@ -57,7 +57,8 @@
           <select class="input" name="user_id" required {% if not unassigned_users %}disabled{% endif %}>
             <option value="">Select user</option>
             {% for u in unassigned_users %}
-              <option value="{{ u.id }}">{{ u.username }}</option>
+              {% set user_label = (u.display_name or '').strip() or ((u.email or '').split('@')[0] if u.email else '') or ((u.username or '').split('@')[0] if '@' in (u.username or '') else (u.username or '')) %}
+              <option value="{{ u.id }}">{{ user_label }}</option>
             {% endfor %}
           </select>
         </label>
@@ -86,6 +87,40 @@
       {% endif %}
     </div>
   </div>
+
+  <div class="panel" style="margin-top:16px;">
+    <div class="panel-header">
+      <div>
+        <div class="panel-title">Remove Member From Team</div>
+        <div class="panel-sub">
+          {% if user.role == "admin" %}
+          Remove any assigned user from their current team.
+          {% else %}
+          Remove users from Team {{ user.team }}.
+          {% endif %}
+        </div>
+      </div>
+    </div>
+    <div class="panel-body">
+      {% if team_members %}
+      <div class="stack">
+        {% for member in team_members %}
+          {% set member_label = (member.display_name or '').strip() or ((member.email or '').split('@')[0] if member.email else '') or ((member.username or '').split('@')[0] if '@' in (member.username or '') else (member.username or '')) %}
+          <form method="post" action="/team-members/remove" class="actions" style="justify-content:space-between; align-items:center; gap:12px; padding:12px 0; border-bottom:1px solid rgba(148,163,184,.2);">
+            <div>
+              <div><strong>{{ member_label }}</strong></div>
+              <div class="small-muted">Team {{ member.team }}</div>
+            </div>
+            <input type="hidden" name="user_id" value="{{ member.id }}">
+            <button class="btn" type="submit">Remove</button>
+          </form>
+        {% endfor %}
+      </div>
+      {% else %}
+      <div class="small-muted">No assigned team members available to remove.</div>
+      {% endif %}
+    </div>
+  </div>
   {% else %}
   <div class="panel">
     <div class="panel-body">
@@ -101,7 +136,34 @@
       </div>
     </div>
     <div class="panel-body">
-      <a class="btn btn-signout" href="/logout">Logout</a>
+      <div class="grid2" style="align-items:start;">
+        <form method="post" action="/settings/username" class="stack">
+          <label class="stack">
+            <span class="small-muted">Username</span>
+            <input class="input" type="text" name="username" value="{{ user.username or '' }}" required>
+          </label>
+          <div class="actions">
+            <button class="btn primary" type="submit">Change Username</button>
+          </div>
+        </form>
+
+        <form method="post" action="/settings/password" class="stack">
+          <label class="stack">
+            <span class="small-muted">New Password</span>
+            <input class="input" type="password" name="new_password" required>
+          </label>
+          <label class="stack">
+            <span class="small-muted">Confirm Password</span>
+            <input class="input" type="password" name="confirm_password" required>
+          </label>
+          <div class="actions">
+            <button class="btn primary" type="submit">Change Password</button>
+          </div>
+        </form>
+      </div>
+      <div class="actions" style="margin-top:16px;">
+        <a class="btn btn-signout" href="/logout">Logout</a>
+      </div>
     </div>
   </div>
 </div>

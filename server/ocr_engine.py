@@ -42,6 +42,13 @@ def _ensure_cv2_loaded() -> bool:
 
 
 BASE_DIR = os.path.dirname(__file__)
+RUNTIME_DIR = Path(BASE_DIR).parent / ".runtime"
+YOLO_CONFIG_DIR = RUNTIME_DIR / "ultralytics"
+MPLCONFIGDIR = RUNTIME_DIR / "matplotlib"
+YOLO_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+MPLCONFIGDIR.mkdir(parents=True, exist_ok=True)
+os.environ.setdefault("YOLO_CONFIG_DIR", str(YOLO_CONFIG_DIR))
+os.environ.setdefault("MPLCONFIGDIR", str(MPLCONFIGDIR))
 
 YOLO_MODEL_PATH = os.getenv(
     "YOLO_MODEL_PATH",
@@ -52,6 +59,7 @@ DEBUG_DIR = Path(os.path.join(BASE_DIR, "static", "debug"))
 DEBUG_DIR.mkdir(parents=True, exist_ok=True)
 
 _yolo = None
+_fire_point_yolo = None
 # Homebrew path on Apple Silicon (Tesseract)
 if pytesseract is not None:
     pytesseract.pytesseract.tesseract_cmd = "/opt/homebrew/bin/tesseract"
@@ -239,6 +247,48 @@ def _gcv_full_text_from_bytes(image_bytes: bytes) -> str:
     return (full or "").strip()
 
 
+def _gcv_fire_point_annotations(image_bytes: bytes) -> Dict[str, Any]:
+    """
+    Ask Google Vision for visual signals that indicate fire-fighting equipment.
+    TEXT_DETECTION alone is too weak because many valid photos contain no readable text.
+    """
+    api_key = _get_gcv_api_key()
+    url = f"https://vision.googleapis.com/v1/images:annotate?key={api_key}"
+    payload = {
+        "requests": [
+            {
+                "image": {"content": base64.b64encode(image_bytes).decode("ascii")},
+                "features": [
+                    {"type": "OBJECT_LOCALIZATION", "maxResults": 20},
+                    {"type": "LABEL_DETECTION", "maxResults": 20},
+                    {"type": "TEXT_DETECTION"},
+                ],
+            }
+        ]
+    }
+    req = urllib.request.Request(
+        url=url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            body = resp.read().decode("utf-8")
+            resp_obj = json.loads(body)
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"GCV HTTP {e.code}: {body}") from e
+    except Exception as e:
+        raise RuntimeError(f"GCV request failed: {e}") from e
+
+    responses = resp_obj.get("responses", []) if isinstance(resp_obj, dict) else []
+    r0 = responses[0] if responses else {}
+    if isinstance(r0, dict) and r0.get("error"):
+        raise RuntimeError(f"GCV error: {r0.get('error')}")
+    return r0 if isinstance(r0, dict) else {}
+
+
 def _pad_box(x0: int, y0: int, x1: int, y1: int, w: int, h: int, pad: float = 0.10) -> Tuple[int, int, int, int]:
     bw = x1 - x0
     bh = y1 - y0
@@ -287,6 +337,142 @@ def get_yolo():
         log(f"[YOLO] Warmup inference failed: {e}")
 
     return _yolo
+
+
+def get_fire_point_model():
+    """
+    Lazy-load fire-point detection model.
+    Falls back to caller-side logic when model is missing/unavailable.
+    """
+    global _fire_point_yolo
+    if _fire_point_yolo is not None:
+        return _fire_point_yolo
+
+    model_path = os.getenv(
+        "FIREPOINT_MODEL_PATH",
+        os.path.join(BASE_DIR, "models", "firfightingpoint_best.pt"),
+    )
+    if not os.path.exists(model_path):
+        raise FileNotFoundError(f"Fire-point model not found: {model_path}")
+
+    os.environ.setdefault("TORCHDYNAMO_DISABLE", "1")
+    os.environ.setdefault("TORCHINDUCTOR_DISABLE", "1")
+    os.environ.setdefault("TORCH_COMPILE_DISABLE", "1")
+    os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
+    os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+
+    log(f"[FIRE_POINT][YOLO] Loading model: {model_path}")
+    from ultralytics import YOLO  # lazy import
+    _fire_point_yolo = YOLO(model_path)
+    return _fire_point_yolo
+
+
+def _fire_point_detect_with_model(image_path: str) -> Dict[str, Any]:
+    model = get_fire_point_model()
+    if not _ensure_cv2_loaded() or cv2 is None:
+        raise RuntimeError("cv2 is unavailable for fire-point model inference")
+    img = cv2.imread(image_path)
+    if img is None:
+        raise RuntimeError("Failed to decode image for fire-point model inference")
+
+    results = model.predict(img, imgsz=640, conf=0.25, verbose=False)
+    if not results:
+        return {"present": False, "confidence": 0.0, "detections": 0, "source": "firepoint_model"}
+
+    r0 = results[0]
+    boxes = getattr(r0, "boxes", None)
+    if boxes is None or boxes.conf is None or len(boxes) == 0:
+        return {"present": False, "confidence": 0.0, "detections": 0, "source": "firepoint_model"}
+
+    confs = boxes.conf.cpu().numpy().tolist()
+    best_conf = max([float(c) for c in confs], default=0.0)
+    detections = len(confs)
+    present = detections > 0 and best_conf >= 0.25
+    return {
+        "present": bool(present),
+        "confidence": float(best_conf),
+        "detections": int(detections),
+        "source": "firepoint_model",
+    }
+
+
+def _fire_point_detect_with_gcv(image_bytes: bytes) -> Dict[str, Any]:
+    response = _gcv_fire_point_annotations(image_bytes)
+    text_annotations = response.get("textAnnotations", []) if isinstance(response, dict) else []
+    localized = response.get("localizedObjectAnnotations", []) if isinstance(response, dict) else []
+    labels = response.get("labelAnnotations", []) if isinstance(response, dict) else []
+
+    text = ""
+    if text_annotations and isinstance(text_annotations[0], dict):
+        text = (text_annotations[0].get("description") or "").lower()
+
+    strong_keywords = [
+        "fire extinguisher",
+        "extinguisher",
+        "hose reel",
+        "fire hose",
+        "hydrant",
+        "fire bucket",
+        "fire alarm",
+        "fire point",
+        "sprinkler",
+    ]
+    weak_keywords = [
+        "alarm",
+        "smoke detector",
+        "safety equipment",
+        "emergency equipment",
+        "safety sign",
+        "emergency sign",
+    ]
+
+    def _collect_matches(items: List[Dict[str, Any]], field: str) -> List[Dict[str, Any]]:
+        matches: List[Dict[str, Any]] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            raw = (item.get(field) or "").strip()
+            name = raw.lower()
+            if not name:
+                continue
+            score = float(item.get("score") or 0.0)
+            for keyword in strong_keywords + weak_keywords:
+                if keyword in name:
+                    matches.append({"name": raw, "keyword": keyword, "score": score})
+                    break
+        return matches
+
+    object_matches = _collect_matches(localized, "name")
+    label_matches = _collect_matches(labels, "description")
+    text_matches = [k for k in strong_keywords if k in text]
+
+    best_object_score = max([m["score"] for m in object_matches], default=0.0)
+    best_label_score = max([m["score"] for m in label_matches], default=0.0)
+    weak_match_count = sum(1 for m in object_matches + label_matches if m["keyword"] in weak_keywords)
+
+    present = bool(
+        best_object_score >= 0.35
+        or best_label_score >= 0.60
+        or text_matches
+        or weak_match_count >= 2
+    )
+    confidence = max(
+        best_object_score,
+        best_label_score,
+        0.88 if text_matches else 0.0,
+        0.66 if weak_match_count >= 2 else 0.0,
+        0.2,
+    )
+    return {
+        "present": bool(present),
+        "confidence": float(confidence),
+        "matched_keywords": text_matches,
+        "object_matches": object_matches[:10],
+        "label_matches": label_matches[:10],
+        "weak_match_count": int(weak_match_count),
+        "ocr_excerpt": text[:800],
+        "source": "google_vision",
+    }
 
 
 def save_yolo_debug(img_bgr: np.ndarray, box: Tuple[int, int, int, int], out_path: str) -> None:
@@ -1052,91 +1238,33 @@ def run_ocr(image_path: str, debug_id: Optional[str] = None, meter_type: Optiona
 
 def detect_fire_fighting_equipment(image_path: str) -> Dict[str, Any]:
     """
-    Heuristic detector for fire point photos using OCR keyword matching.
-    Returns whether fire safety equipment is likely present in frame.
+    Detect fire-point/safety equipment with model-first strategy:
+    1) fire-point YOLO model
+    2) fallback to Google Vision OCR keyword detection
     """
     with open(image_path, "rb") as f:
         image_bytes = f.read()
     if not image_bytes:
         raise RuntimeError("Failed to read image bytes for fire-point detection")
 
-    full_text_parts: List[str] = []
-    local_ocr_error = ""
-    img = None
+    model_error = ""
+    try:
+        model_result = _fire_point_detect_with_model(image_path)
+        model_result["model_error"] = None
+        model_result["gcv_error"] = None
+        return model_result
+    except Exception as e:
+        model_error = str(e)
+        log(f"[FIRE_POINT] Model detection failed, falling back to GCV: {e}")
 
-    # Local OCR is best-effort; GCV fallback should still work when cv2 is unavailable.
-    if _ensure_cv2_loaded() and cv2 is not None:
-        try:
-            tesseract = _get_pytesseract()
-            img = cv2.imread(image_path)
-            if img is not None:
-                gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-                clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(gray)
-                _, otsu = cv2.threshold(clahe, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-
-                variants = [
-                    ("gray", gray),
-                    ("clahe", clahe),
-                    ("otsu", otsu),
-                ]
-                for _, vimg in variants:
-                    text = tesseract.image_to_string(vimg, config="--oem 3 --psm 6")
-                    if text and text.strip():
-                        full_text_parts.append(text.strip().lower())
-            else:
-                local_ocr_error = "cv2 failed to decode image"
-        except Exception as e:
-            local_ocr_error = str(e)
-    else:
-        local_ocr_error = "cv2 is not available"
-
-    # Google Vision OCR (if configured) is combined with local OCR for better recall.
-    gcv_text = ""
-    gcv_error = ""
-    gcv_enabled = _ocr_backend_mode() in {"gcv", "gcv_then_tesseract"}
-    if gcv_enabled:
-        try:
-            gcv_text = _gcv_full_text_from_bytes(image_bytes).lower()
-        except Exception as e:
-            gcv_error = str(e)
-            log(f"[FIRE_POINT] GCV OCR failed: {e}")
-
-    full_text = "\n".join([p for p in [*full_text_parts, gcv_text] if p])
-
-    keywords = [
-        "fire extinguisher",
-        "extinguisher",
-        "hose reel",
-        "fire hose",
-        "hydrant",
-        "fire bucket",
-        "fire alarm",
-        "fire point",
-        "smoke detector",
-        "sprinkler",
-    ]
-    matched = [k for k in keywords if k in full_text]
-
-    # compact token fallback catches split words like "exting uisher"
-    token_hits = 0
-    for token in ["fire", "exting", "hydrant", "hose", "reel", "alarm", "sprinkler"]:
-        if token in full_text:
-            token_hits += 1
-
-    present = bool(matched) or token_hits >= 2
-    confidence = 0.9 if matched else (0.6 if token_hits >= 2 else 0.15)
-
-    if not full_text.strip():
-        detail = gcv_error or local_ocr_error or "No OCR text extracted"
-        raise RuntimeError(f"Unable to process fire point image: {detail}")
-
-    return {
-        "present": present,
-        "confidence": confidence,
-        "matched_keywords": matched,
-        "token_hits": token_hits,
-        "ocr_excerpt": full_text[:800],
-        "gcv_used": gcv_enabled,
-        "gcv_error": gcv_error or None,
-        "local_ocr_error": local_ocr_error or None,
-    }
+    try:
+        gcv_result = _fire_point_detect_with_gcv(image_bytes)
+        gcv_result["model_error"] = model_error or None
+        gcv_result["gcv_error"] = None
+        return gcv_result
+    except Exception as e:
+        gcv_error = str(e)
+        log(f"[FIRE_POINT] GCV fallback failed: {e}")
+        raise RuntimeError(
+            f"Fire-point detection failed (model + GCV). model_error={model_error}; gcv_error={gcv_error}"
+        ) from e

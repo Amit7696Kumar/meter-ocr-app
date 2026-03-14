@@ -26,7 +26,7 @@
       <div class="badge">Unread Alerts: <strong id="unreadBadge">{{ unread_count }}</strong></div>
       <a class="btn small" href="/alerts" aria-label="Open Alerts">🔔 Alerts</a>
       <a class="btn" href="/tasks">Tasks</a>
-      <a class="btn" href="/users">Users</a>
+      <a class="btn" href="/users">Members</a>
       <a class="btn" href="/settings">Settings</a>
       <button class="btn" type="button" id="openChatPopupBtn" onclick="window.__openChatPopup && window.__openChatPopup()">Open Messages</button>
       <button class="btn btn-install js-install-app" type="button" hidden style="display:none;">Install App</button>
@@ -109,7 +109,7 @@
         </thead>
         <tbody>
           {% for r in readings %}
-          <tr data-meter="{{ r.meter_type }}" data-user="{{ r.username }}" data-label="{{ r.label }}" data-created="{{ r.created_at }}" data-value="{{ r.value or '' }}" data-filename="{{ r.filename or '' }}" data-status="{{ (r.status or '')|lower }}">
+          <tr data-meter="{{ r.meter_type }}" data-user="{{ r.username }}" data-label="{{ r.label }}" data-created="{{ r.created_at }}" data-value="{{ r.value or '' }}" data-filename="{{ r.filename or '' }}" data-status="{{ (r.status or '')|lower }}" data-ocrjson="{{ (r.ocr_json or '')|e }}">
             <td>{{ r.id }}</td>
             <td>{{ r.created_at }}</td>
             <td><b>{{ r.label or r.meter_type }}</b></td>
@@ -138,7 +138,7 @@
           </tr>
           {% endfor %}
           {% for t in task_instances %}
-          <tr data-meter="task" data-user="{{ t.assigned_username or t.assigned_user_id }}" data-label="{{ t.title }}" data-created="{{ t.submitted_at or t.deadline_at }}" data-value="{{ '' if (t.response_value|string|lower) == 'overdue' else (t.response_value or '') }}" data-status="{{ (t.status or '')|lower }}">
+          <tr data-meter="task" data-user="{{ t.assigned_username or t.assigned_user_id }}" data-label="{{ t.title }}" data-created="{{ t.submitted_at or t.deadline_at }}" data-value="{{ '' if (t.response_value|string|lower) == 'overdue' else (t.response_value or '') }}" data-status="{{ (t.status or '')|lower }}" data-ai-result="{{ (t.ai_result_reference or '')|e }}">
             <td>{{ t.id }}</td>
             <td>{{ t.submitted_at or t.deadline_at }}</td>
             <td><b>{{ t.title }}</b></td>
@@ -200,10 +200,11 @@
         <div class="modal-title" id="modalTitle">Reading</div>
         <div class="small-muted" id="modalSub"></div>
       </div>
-      <button class="btn" type="button" id="modalClose">Done</button>
+      <button class="modal-close-btn" type="button" id="modalClose" aria-label="Close image viewer">&times;</button>
     </div>
 
     <div class="modal-body">
+      <div id="modalMeta" class="small-muted" style="margin-bottom:12px;"></div>
       <div id="modalImages" class="imggrid"></div>
     </div>
   </div>
@@ -271,26 +272,42 @@ document.addEventListener("click", (e) => {
   const modal = document.getElementById("modal");
   const title = document.getElementById("modalTitle");
   const sub = document.getElementById("modalSub");
+  const meta = document.getElementById("modalMeta");
   const images = document.getElementById("modalImages");
   if (!modal || !title || !sub || !images) return;
 
   const src = btn.getAttribute("data-src");
   const src2 = btn.getAttribute("data-src2");
   if (!src) return;
+  const row = btn.closest("tr");
+  const ocrRaw = row?.dataset.ocrjson || "";
+  const aiResult = row?.dataset.aiResult || "";
+  let detectorSource = "";
+  try {
+    const parsed = ocrRaw ? JSON.parse(ocrRaw) : null;
+    detectorSource = parsed?.object_detection?.source || parsed?.fire_point?.source || "";
+  } catch (_) {}
+  if (!detectorSource && aiResult) {
+    const match = aiResult.match(/Fire-point detection \(([^)]+)\)/i);
+    detectorSource = match ? match[1] : "";
+  }
 
   title.textContent = src2 ? "Uploaded Images" : "Uploaded Image";
-  sub.textContent = "";
+  sub.textContent = "Scroll to inspect the full image";
+  if (meta) {
+    meta.textContent = detectorSource ? `Detector: ${detectorSource}` : "";
+  }
   let html = `
     <div class="imgcard">
       <div class="small-muted" style="margin-bottom:6px;"><b>${src2 ? "Start Image" : "Uploaded Image"}</b></div>
-      <img src="${src}" alt="Uploaded Image" />
+      <img src="${src}" loading="eager" decoding="async" alt="Uploaded Image" />
     </div>
   `;
   if (src2) {
     html += `
       <div class="imgcard">
         <div class="small-muted" style="margin-bottom:6px;"><b>End Image</b></div>
-        <img src="${src2}" alt="Uploaded Image 2" />
+        <img src="${src2}" loading="eager" decoding="async" alt="Uploaded Image 2" />
       </div>
     `;
   }

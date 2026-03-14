@@ -5,6 +5,12 @@ function safeJsonParse(str) {
   try { return JSON.parse(str); } catch { return null; }
 }
 
+function buildUploadPreviewUrl(src) {
+  const raw = String(src || "").trim();
+  if (!raw) return "";
+  return `/api/uploads/preview?src=${encodeURIComponent(raw)}`;
+}
+
 function setupTabs() {
   const tabs = qsa(".tab");
   const contents = qsa(".tab-content");
@@ -143,8 +149,9 @@ function setupFiltering(tableId, searchId, meterSelectId, statusSelectId = null)
   const search = qs(`#${searchId}`);
   const meterSel = qs(`#${meterSelectId}`);
   const statusSel = statusSelectId ? qs(`#${statusSelectId}`) : null;
+  const mobileCards = qsa(".admin-mobile-reading-card");
 
-  if (!table || !search || !meterSel) return;
+  if ((!table && !mobileCards.length) || !search || !meterSel) return;
 
   const meterKeywords = {
     earthing: ["earthing"],
@@ -154,16 +161,16 @@ function setupFiltering(tableId, searchId, meterSelectId, statusSelectId = null)
     fire_point: ["fire point", "fire_point", "firepoint"],
   };
 
-  const meterMatchesRow = (meter, tr) => {
+  const meterMatchesItem = (meter, item) => {
     if (meter === "all") return true;
-    const rowMeter = (tr.dataset.meter || "").toLowerCase();
+    const rowMeter = (item.dataset.meter || "").toLowerCase();
     if (rowMeter === meter) return true;
 
     // Support task-title filtering on merged tables where rowMeter can be "task"
     // and also cases where labels/titles carry the semantic meter type.
-    const label = (tr.dataset.label || "").toLowerCase();
-    const taskCell = (tr.querySelector("td:nth-child(3)")?.innerText || "").toLowerCase();
-    const rowText = (` ${tr.innerText.toLowerCase()} `);
+    const label = (item.dataset.label || "").toLowerCase();
+    const taskCell = (item.querySelector("td:nth-child(3)")?.innerText || "").toLowerCase();
+    const rowText = (` ${item.innerText.toLowerCase()} `);
     const haystack = ` ${label} ${taskCell} ${rowText} `;
     const keys = meterKeywords[meter] || [];
     return keys.some((k) => haystack.includes(` ${k} `) || haystack.includes(k));
@@ -174,13 +181,22 @@ function setupFiltering(tableId, searchId, meterSelectId, statusSelectId = null)
     const meter = meterSel.value;
     const status = (statusSel?.value || "all").toLowerCase();
 
-    qsa("tbody tr", table).forEach(tr => {
-      const meterOk = meterMatchesRow(meter, tr);
+    qsa("tbody tr", table || document).forEach(tr => {
+      const meterOk = meterMatchesItem(meter, tr);
       const text = tr.innerText.toLowerCase();
       const qOk = !q || text.includes(q);
       const rowStatus = ((tr.dataset.status || tr.querySelector("td:nth-child(5)")?.innerText || "").toLowerCase()).trim();
       const statusOk = status === "all" || rowStatus.includes(status);
       tr.style.display = (meterOk && qOk && statusOk) ? "" : "none";
+    });
+
+    mobileCards.forEach((card) => {
+      const meterOk = meterMatchesItem(meter, card);
+      const text = card.innerText.toLowerCase();
+      const qOk = !q || text.includes(q);
+      const cardStatus = (card.dataset.status || "").toLowerCase().trim();
+      const statusOk = status === "all" || cardStatus.includes(status);
+      card.style.display = (meterOk && qOk && statusOk) ? "" : "grid";
     });
   };
 
@@ -693,6 +709,7 @@ function setupChatPopup() {
     activePeerUserId: null,
     showArchived: false,
     isOpen: false,
+    pageScrollY: 0,
     pollTimer: null,
     typingTimer: null,
     typingStopTimer: null,
@@ -715,6 +732,30 @@ function setupChatPopup() {
   const newGroupBtn = q("chatNewGroupBtn");
   const isMobileChatViewport = () => window.matchMedia("(max-width: 900px)").matches;
   let lastChatVh = 0;
+
+  function lockBodyScroll() {
+    document.body.classList.add("chat-open-lock");
+    if (!isMobileChatViewport()) return;
+    state.pageScrollY = window.scrollY || window.pageYOffset || 0;
+    document.body.style.position = "fixed";
+    document.body.style.top = `-${state.pageScrollY}px`;
+    document.body.style.left = "0";
+    document.body.style.right = "0";
+    document.body.style.width = "100%";
+  }
+
+  function unlockBodyScroll() {
+    if (isMobileChatViewport()) {
+      const y = Number(state.pageScrollY || 0);
+      document.body.style.position = "";
+      document.body.style.top = "";
+      document.body.style.left = "";
+      document.body.style.right = "";
+      document.body.style.width = "";
+      window.scrollTo(0, y);
+    }
+    document.body.classList.remove("chat-open-lock");
+  }
 
   function syncChatViewportHeight() {
     const vv = window.visualViewport;
@@ -744,7 +785,7 @@ function setupChatPopup() {
     modal.classList.add("open");
     modal.setAttribute("aria-hidden", "false");
     modal.classList.remove("mobile-thread-active");
-    document.body.classList.add("chat-open-lock");
+    lockBodyScroll();
     syncChatViewportHeight();
     refreshAll();
     if (state.pollTimer) clearInterval(state.pollTimer);
@@ -757,7 +798,7 @@ function setupChatPopup() {
     modal.classList.remove("open");
     modal.setAttribute("aria-hidden", "true");
     modal.classList.remove("mobile-thread-active");
-    document.body.classList.remove("chat-open-lock");
+    unlockBodyScroll();
     if (state.pollTimer) clearInterval(state.pollTimer);
     state.pollTimer = null;
   }
@@ -827,7 +868,7 @@ function setupChatPopup() {
 
   function renderMessages(messages, members, typingUserIds) {
     const memberMap = {};
-    (members || []).forEach(m => { memberMap[m.user_id] = m.username; });
+    (members || []).forEach(m => { memberMap[m.user_id] = m.display_name || m.username; });
     if (threadMetaEl) {
       const typingNames = (typingUserIds || []).map(uid => memberMap[uid]).filter(Boolean);
       threadMetaEl.textContent = typingNames.length ? `${typingNames.join(", ")} typing...` : "";
@@ -867,7 +908,7 @@ function setupChatPopup() {
         return {
           id: 0,
           peer_user_id: peerId,
-          display_name: u.username,
+          display_name: u.display_name || u.username,
           last_message_body: "",
           last_message_at: "",
           unread_count: 0,
@@ -878,7 +919,7 @@ function setupChatPopup() {
       return {
         ...c,
         peer_user_id: peerId,
-        display_name: c.display_name || u.username,
+        display_name: c.display_name || u.display_name || u.username,
       };
     });
     rows.sort((a, b) => {
@@ -898,7 +939,8 @@ function setupChatPopup() {
       const data = await api("/api/chat/bootstrap");
       state.users = data.users || [];
       if (presenceEl) {
-        presenceEl.textContent = `Signed in as ${data.me.username} (${String(data.me.role || "").toUpperCase()})`;
+        const meName = data.me.display_name || data.me.username;
+        presenceEl.textContent = `Signed in as ${meName} (${String(data.me.role || "").toUpperCase()})`;
       }
     } catch (e) {
       if (presenceEl) presenceEl.textContent = String(e.message || "Failed to load chat users");
@@ -924,7 +966,7 @@ function setupChatPopup() {
     const convId = Number(state.activeConversationId || 0);
     if (!convId && state.activePeerUserId) {
       const u = (state.users || []).find((x) => Number(x.id) === Number(state.activePeerUserId));
-      const nm = (u && u.username) || "Conversation";
+      const nm = (u && (u.display_name || u.username)) || "Conversation";
       if (threadTitleEl) threadTitleEl.textContent = nm;
       if (threadAvatarEl) threadAvatarEl.textContent = nm.trim().charAt(0).toUpperCase();
       if (threadMetaEl) threadMetaEl.textContent = "No chat yet";
@@ -1000,10 +1042,10 @@ function setupChatPopup() {
 
   async function createDirect() {
     if (!state.users.length) await fetchBootstrap();
-    const options = state.users.map(u => `${u.username} (${u.role}${u.team ? ` T${u.team}` : ""})`).join("\n");
-    const chosen = window.prompt(`Start direct chat with username:\n${options}`);
+    const options = state.users.map(u => `${u.display_name || u.username} (${u.role}${u.team ? ` T${u.team}` : ""})`).join("\n");
+    const chosen = window.prompt(`Start direct chat with name:\n${options}`);
     if (!chosen) return;
-    const target = state.users.find(u => String(u.username).toLowerCase() === chosen.trim().toLowerCase());
+    const target = state.users.find(u => String(u.display_name || u.username).toLowerCase() === chosen.trim().toLowerCase());
     if (!target) {
       window.alert("User not found in allowed chat list.");
       return;
@@ -1020,10 +1062,12 @@ function setupChatPopup() {
     if (!state.users.length) await fetchBootstrap();
     const title = (window.prompt("Enter group name:") || "").trim();
     if (!title) return;
-    const pick = window.prompt("Enter comma-separated usernames to add:");
+    const pick = window.prompt("Enter comma-separated names to add:");
     if (!pick) return;
     const names = pick.split(",").map(x => x.trim().toLowerCase()).filter(Boolean);
-    const ids = state.users.filter(u => names.includes(String(u.username).toLowerCase())).map(u => Number(u.id));
+    const ids = state.users
+      .filter(u => names.includes(String(u.display_name || u.username).toLowerCase()))
+      .map(u => Number(u.id));
     if (!ids.length) {
       window.alert("No valid users selected.");
       return;

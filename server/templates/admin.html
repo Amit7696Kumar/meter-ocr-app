@@ -4,7 +4,7 @@
   {% set page_title = "Admin — DET MONITORING APPLICATION" %}
   {% include "_partials/head_assets.html" %}
 </head>
-<body class="app-shell">
+<body class="app-shell admin-dashboard-page">
 <div class="nav">
   <div class="nav-inner">
     {% set brand_subtitle = "Admin Dashboard" %}
@@ -14,6 +14,7 @@
       <div class="badge">Unread Alerts: <strong id="unreadBadge">{{ unread_count }}</strong></div>
       <a class="btn small" href="/alerts" aria-label="Open Alerts">🔔 Alerts</a>
       <a class="btn" href="/tasks">Tasks</a>
+      <a class="btn" href="/teams">Teams</a>
       <a class="btn" href="/settings">Settings</a>
       <button class="btn" type="button" id="openChatPopupBtn" onclick="window.__openChatPopup && window.__openChatPopup()">Open Messages</button>
       <button class="btn btn-install js-install-app" type="button" hidden style="display:none;">Install App</button>
@@ -25,6 +26,37 @@
 
 <div class="container">
   <div id="chatMeta" data-user-id="{{ user.id }}" data-role="{{ user.role }}" data-team="{{ user.team or '' }}"></div>
+
+  <section class="admin-mobile-hero" aria-label="Admin mobile dashboard header">
+    <div class="admin-mobile-topbar">
+      <div class="admin-mobile-brand-block">
+        <img class="admin-mobile-logo" src="/static/icons/newicon.png?v={{ static_version }}" alt="DET logo">
+        <div class="admin-mobile-brand-pill">
+          <div class="admin-mobile-brand-title">DET MONITORING</div>
+          <div class="admin-mobile-brand-subtitle">Admin Dashboard</div>
+        </div>
+      </div>
+      <div class="admin-mobile-actions">
+        <a class="admin-mobile-icon admin-mobile-alerts" href="/alerts" aria-label="Notifications">
+          <span class="admin-mobile-icon-glyph">🔔</span>
+          {% if unread_count and unread_count > 0 %}
+          <span class="admin-mobile-icon-badge">{{ unread_count }}</span>
+          {% endif %}
+        </a>
+        <a class="admin-mobile-icon admin-mobile-teams" href="/teams" aria-label="Teams">
+          <span class="admin-mobile-icon-glyph">👥</span>
+        </a>
+        <a class="admin-mobile-icon admin-mobile-profile" href="/settings" aria-label="Profile">
+          <span class="admin-mobile-icon-glyph">👤</span>
+        </a>
+      </div>
+    </div>
+
+    <div class="admin-mobile-title-block">
+      <h1 class="admin-mobile-title">Admin Command Center</h1>
+      <p class="admin-mobile-subtitle">Monitor team health, review anomalies, and inspect reading evidence in one place.</p>
+    </div>
+  </section>
 
   <div class="page-head">
     <div>
@@ -71,7 +103,80 @@
         </select>
       </div>
 
+      <div class="admin-mobile-readings-head">
+        <h2 class="admin-mobile-section-title">All Readings</h2>
+        <p class="admin-mobile-section-subtitle">Click a value or “Open” to review details</p>
+      </div>
+
       {% if (readings and readings|length > 0) or (task_instances and task_instances|length > 0) %}
+      <div class="admin-mobile-card-list" id="adminMobileReadings">
+        {% for r in readings %}
+        <article
+          class="admin-mobile-reading-card"
+          data-meter="{{ r.meter_type }}"
+          data-user="{{ r.username }}"
+          data-label="{{ r.label }}"
+          data-created="{{ r.created_at }}"
+          data-value="{{ r.value or '' }}"
+          data-status="{{ (r.status or 'overdue')|lower }}"
+          data-ocrjson="{{ (r.ocr_json or '')|e }}"
+        >
+          <div class="admin-mobile-card-main">
+            <div class="admin-mobile-user">{{ r.username }}</div>
+            <div class="admin-mobile-value">{% if r.value %}{{ r.value }}{% else %}-{% endif %}</div>
+            <div class="admin-mobile-badge-wrap">
+              {% set status_text = (r.status or "OVERDUE")|upper %}
+              <span class="admin-mobile-status-badge {% if (r.status or 'overdue')|lower == 'overdue' %}is-overdue{% else %}is-default{% endif %}">
+                <span class="admin-mobile-status-dot"></span>{{ status_text }}
+              </span>
+            </div>
+          </div>
+          <div class="admin-mobile-card-action">
+            {% if r.filename %}
+            <button class="btn admin-mobile-open-btn js-open-image" type="button" data-src="/uploads/{{ r.filename }}" {% if r.filename_2 %}data-src2="/uploads/{{ r.filename_2 }}"{% endif %}>Open →</button>
+            {% else %}
+            <button class="btn admin-mobile-open-btn" type="button" disabled>Open →</button>
+            {% endif %}
+          </div>
+        </article>
+        {% endfor %}
+        {% for t in task_instances %}
+        <article
+          class="admin-mobile-reading-card"
+          data-meter="task"
+          data-user="{{ t.assigned_username or t.assigned_user_id }}"
+          data-label="{{ t.title }}"
+          data-created="{{ t.submitted_at or t.deadline_at }}"
+          data-value="{{ '' if (t.response_value|string|lower) == 'overdue' else (t.response_value or '') }}"
+          data-status="{{ (t.status or 'overdue')|lower }}"
+          data-ai-result="{{ (t.ai_result_reference or '')|e }}"
+        >
+          <div class="admin-mobile-card-main">
+            <div class="admin-mobile-user">{{ t.assigned_username or t.assigned_user_id }}</div>
+            <div class="admin-mobile-value">
+              {% if t.response_value is not none and (t.response_value|string|lower) != 'overdue' %}
+              {{ t.response_value }}
+              {% else %}
+              -
+              {% endif %}
+            </div>
+            <div class="admin-mobile-badge-wrap">
+              {% set task_status_text = (t.status or "OVERDUE")|upper %}
+              <span class="admin-mobile-status-badge {% if (t.status or 'overdue')|lower == 'overdue' %}is-overdue{% else %}is-default{% endif %}">
+                <span class="admin-mobile-status-dot"></span>{{ task_status_text }}
+              </span>
+            </div>
+          </div>
+          <div class="admin-mobile-card-action">
+            {% if t.response_file_path and t.response_file_path.startswith('/uploads/') %}
+            <button class="btn admin-mobile-open-btn js-open-image" type="button" data-src="{{ t.response_file_path }}" {% if t.response_file_path_2 %}data-src2="{{ t.response_file_path_2 }}"{% endif %}>Open →</button>
+            {% else %}
+            <button class="btn admin-mobile-open-btn" type="button" disabled>Open →</button>
+            {% endif %}
+          </div>
+        </article>
+        {% endfor %}
+      </div>
       <div class="table-wrap">
         <table class="table mobile-friendly-table" id="readingsTable">
           <thead>
@@ -87,7 +192,7 @@
           </thead>
           <tbody>
             {% for r in readings %}
-            <tr data-meter="{{ r.meter_type }}" data-user="{{ r.username }}" data-label="{{ r.label }}" data-created="{{ r.created_at }}" data-value="{{ r.value or '' }}" data-filename="{{ r.filename or '' }}" data-status="{{ (r.status or '')|lower }}">
+            <tr data-meter="{{ r.meter_type }}" data-user="{{ r.username }}" data-label="{{ r.label }}" data-created="{{ r.created_at }}" data-value="{{ r.value or '' }}" data-filename="{{ r.filename or '' }}" data-status="{{ (r.status or '')|lower }}" data-ocrjson="{{ (r.ocr_json or '')|e }}">
               <td>{{ r.id }}</td>
               <td>{{ r.created_at }}</td>
               <td><b>{{ r.label or r.meter_type }}</b></td>
@@ -116,7 +221,7 @@
             </tr>
             {% endfor %}
             {% for t in task_instances %}
-            <tr data-meter="task" data-user="{{ t.assigned_username or t.assigned_user_id }}" data-label="{{ t.title }}" data-created="{{ t.submitted_at or t.deadline_at }}" data-value="{{ '' if (t.response_value|string|lower) == 'overdue' else (t.response_value or '') }}" data-status="{{ (t.status or '')|lower }}">
+            <tr data-meter="task" data-user="{{ t.assigned_username or t.assigned_user_id }}" data-label="{{ t.title }}" data-created="{{ t.submitted_at or t.deadline_at }}" data-value="{{ '' if (t.response_value|string|lower) == 'overdue' else (t.response_value or '') }}" data-status="{{ (t.status or '')|lower }}" data-ai-result="{{ (t.ai_result_reference or '')|e }}">
               <td>{{ t.id }}</td>
               <td>{{ t.submitted_at or t.deadline_at }}</td>
               <td><b>{{ t.title }}</b></td>
@@ -170,9 +275,10 @@
         <div class="modal-title" id="modalTitle">Reading</div>
         <div class="small-muted" id="modalSub"></div>
       </div>
-      <button class="btn" type="button" id="modalClose">Done</button>
+      <button class="modal-close-btn" type="button" id="modalClose" aria-label="Close image viewer">&times;</button>
     </div>
     <div class="modal-body">
+      <div id="modalMeta" class="small-muted" style="margin-bottom:12px;"></div>
       <div id="modalImages" class="imggrid"></div>
     </div>
   </div>
@@ -233,30 +339,60 @@
 
 <script>
 document.addEventListener("DOMContentLoaded", () => {
+  const searchInput = document.getElementById("searchReadings");
+  if (searchInput && window.matchMedia("(max-width: 768px)").matches) {
+    searchInput.placeholder = "Search team / user / ID";
+  }
   setupFiltering("readingsTable", "searchReadings", "meterFilter", "statusFilter");
 });
 
 document.addEventListener("click", (e) => {
   const btn = e.target.closest(".js-open-image");
   if (!btn) return;
+  e.preventDefault();
   const src1 = btn.dataset.src || "";
   const src2 = btn.dataset.src2 || "";
   const modal = document.getElementById("modal");
+  const title = document.getElementById("modalTitle");
+  const sub = document.getElementById("modalSub");
+  const meta = document.getElementById("modalMeta");
   const images = document.getElementById("modalImages");
   if (!modal || !images || !src1) return;
+  const row = btn.closest("tr, .admin-mobile-reading-card");
+  const ocrRaw = row?.dataset.ocrjson || "";
+  const aiResult = row?.dataset.aiResult || "";
+  let detectorSource = "";
+  try {
+    const parsed = ocrRaw ? JSON.parse(ocrRaw) : null;
+    detectorSource = parsed?.object_detection?.source || parsed?.fire_point?.source || "";
+  } catch (_) {}
+  if (!detectorSource && aiResult) {
+    const match = aiResult.match(/Fire-point detection \(([^)]+)\)/i);
+    detectorSource = match ? match[1] : "";
+  }
+  if (meta) {
+    meta.textContent = detectorSource ? `Detector: ${detectorSource}` : "";
+  }
+
+  if (title) {
+    title.textContent = src2 ? "Uploaded Images" : "Uploaded Image";
+  }
+  if (sub) {
+    sub.textContent = "Scroll to inspect the full image";
+  }
 
   const cards = [];
   cards.push(`
     <div class="imgcard">
-      <div class="small-muted" style="margin-bottom:6px;">Image</div>
-      <img src="${src1}" style="width:100%;border-radius:10px;border:1px solid #333;" />
+      <div class="small-muted" style="margin-bottom:6px;">${src2 ? "Start Image" : "Image"}</div>
+      <img src="${src1}" loading="eager" decoding="async" alt="${src2 ? "Start image" : "Image"}" style="width:100%;border-radius:10px;border:1px solid #333;" />
     </div>
   `);
   if (src2) {
     cards.push(`
       <div class="imgcard">
-        <div class="small-muted" style="margin-bottom:6px;">Image 2</div>
-        <img src="${src2}" style="width:100%;border-radius:10px;border:1px solid #333;" />
+        <div class="small-muted" style="margin-bottom:6px;">End Image</div>
+        <img src="${src2}" loading="eager" decoding="async" alt="End image" style="width:100%;border-radius:10px;border:1px solid #333;" />
       </div>
     `);
   }

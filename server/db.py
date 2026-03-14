@@ -141,6 +141,8 @@ def init_db():
         cur.execute("ALTER TABLE users ADD COLUMN google_id TEXT")
     if "auth_provider" not in user_cols:
         cur.execute("ALTER TABLE users ADD COLUMN auth_provider TEXT")
+    if "force_password_change" not in user_cols:
+        cur.execute("ALTER TABLE users ADD COLUMN force_password_change INTEGER NOT NULL DEFAULT 0")
 
     # Readings uploaded by users
     cur.execute("""
@@ -546,12 +548,19 @@ def init_db():
 # -----------------------------
 # Users
 # -----------------------------
-def create_user(username: str, password_hash: str, role: str, team: Optional[int]):
+def create_user(
+    username: str,
+    password_hash: str,
+    role: str,
+    team: Optional[int],
+    *,
+    force_password_change: bool = False,
+):
     conn = _conn()
     cur = conn.cursor()
     cur.execute(
-        "INSERT INTO users(username, password_hash, role, team) VALUES(?,?,?,?)",
-        (username, password_hash, role, team),
+        "INSERT INTO users(username, password_hash, role, team, force_password_change) VALUES(?,?,?,?,?)",
+        (username, password_hash, role, team, 1 if force_password_change else 0),
     )
     conn.commit()
     conn.close()
@@ -618,18 +627,44 @@ def update_user_identity(
     conn.close()
 
 
-def update_user_password(user_id: int, password_hash: str):
+def update_user_username(user_id: int, username: str):
     conn = _conn()
     cur = conn.cursor()
-    cur.execute("UPDATE users SET password_hash=? WHERE id=?", (password_hash, int(user_id)))
+    cur.execute("UPDATE users SET username=? WHERE id=?", ((username or "").strip(), int(user_id)))
     conn.commit()
     conn.close()
 
 
-def update_user_team(user_id: int, team: int):
+def update_user_password(user_id: int, password_hash: str, force_password_change: Optional[bool] = None):
     conn = _conn()
     cur = conn.cursor()
-    cur.execute("UPDATE users SET team=? WHERE id=?", (int(team), int(user_id)))
+    if force_password_change is None:
+        cur.execute("UPDATE users SET password_hash=? WHERE id=?", (password_hash, int(user_id)))
+    else:
+        cur.execute(
+            "UPDATE users SET password_hash=?, force_password_change=? WHERE id=?",
+            (password_hash, 1 if force_password_change else 0, int(user_id)),
+        )
+    conn.commit()
+    conn.close()
+
+
+def set_user_force_password_change(user_id: int, required: bool):
+    conn = _conn()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE users SET force_password_change=? WHERE id=?",
+        (1 if required else 0, int(user_id)),
+    )
+    conn.commit()
+    conn.close()
+
+
+def update_user_team(user_id: int, team: Optional[int]):
+    conn = _conn()
+    cur = conn.cursor()
+    team_value = None if team is None else int(team)
+    cur.execute("UPDATE users SET team=? WHERE id=?", (team_value, int(user_id)))
     conn.commit()
     conn.close()
 
@@ -646,7 +681,15 @@ def fetch_users_all() -> List[Dict[str, Any]]:
 def fetch_users_by_team(team: int) -> List[Dict[str, Any]]:
     conn = _conn()
     cur = conn.cursor()
-    cur.execute("SELECT id, username, role, team FROM users WHERE team=? ORDER BY username ASC", (team,))
+    cur.execute(
+        """
+        SELECT id, username, role, team, display_name, email
+        FROM users
+        WHERE team=?
+        ORDER BY COALESCE(NULLIF(display_name, ''), username) ASC
+        """,
+        (team,),
+    )
     rows = cur.fetchall()
     conn.close()
     return [dict(x) for x in rows]
@@ -657,7 +700,7 @@ def fetch_users_without_team() -> List[Dict[str, Any]]:
     cur = conn.cursor()
     cur.execute(
         """
-        SELECT id, username, role, team
+        SELECT id, username, role, team, display_name, email
         FROM users
         WHERE role='user'
           AND (
@@ -735,7 +778,7 @@ def fetch_readings_all() -> List[Dict[str, Any]]:
     conn = _conn()
     cur = conn.cursor()
     cur.execute("""
-        SELECT r.*, u.username
+        SELECT r.*, COALESCE(NULLIF(u.display_name, ''), u.username) AS username
         FROM readings r
         JOIN users u ON u.id = r.user_id
         ORDER BY r.created_at DESC
@@ -749,7 +792,7 @@ def fetch_readings_by_team(team: int) -> List[Dict[str, Any]]:
     conn = _conn()
     cur = conn.cursor()
     cur.execute("""
-        SELECT r.*, u.username
+        SELECT r.*, COALESCE(NULLIF(u.display_name, ''), u.username) AS username
         FROM readings r
         JOIN users u ON u.id = r.user_id
         WHERE r.team = ?
@@ -764,7 +807,7 @@ def fetch_readings_by_user(user_id: int) -> List[Dict[str, Any]]:
     conn = _conn()
     cur = conn.cursor()
     cur.execute("""
-        SELECT r.*, u.username
+        SELECT r.*, COALESCE(NULLIF(u.display_name, ''), u.username) AS username
         FROM readings r
         JOIN users u ON u.id = r.user_id
         WHERE r.user_id = ?
@@ -963,32 +1006,32 @@ def chat_list_users_for_picker(*, requester_id: int, role: str, team: Optional[i
     if role == "admin":
         cur.execute(
             """
-            SELECT id, username, role, team
+            SELECT id, username, COALESCE(NULLIF(display_name, ''), username) AS display_name, role, team
             FROM users
             WHERE id <> ?
-            ORDER BY role ASC, team ASC, username ASC
+            ORDER BY role ASC, team ASC, COALESCE(NULLIF(display_name, ''), username) ASC
             """,
             (requester_id,),
         )
     elif role == "coadmin":
         cur.execute(
             """
-            SELECT id, username, role, team
+            SELECT id, username, COALESCE(NULLIF(display_name, ''), username) AS display_name, role, team
             FROM users
             WHERE id <> ?
               AND (role='admin' OR team=?)
-            ORDER BY role ASC, team ASC, username ASC
+            ORDER BY role ASC, team ASC, COALESCE(NULLIF(display_name, ''), username) ASC
             """,
             (requester_id, team),
         )
     else:
         cur.execute(
             """
-            SELECT id, username, role, team
+            SELECT id, username, COALESCE(NULLIF(display_name, ''), username) AS display_name, role, team
             FROM users
             WHERE id <> ?
               AND (role='admin' OR (role='coadmin' AND team=?))
-            ORDER BY role ASC, team ASC, username ASC
+            ORDER BY role ASC, team ASC, COALESCE(NULLIF(display_name, ''), username) ASC
             """,
             (requester_id, team),
         )
@@ -1105,11 +1148,11 @@ def chat_fetch_members(conversation_id: int) -> List[Dict[str, Any]]:
     cur = conn.cursor()
     cur.execute(
         """
-        SELECT m.user_id, m.member_role, u.username, u.role, u.team
+        SELECT m.user_id, m.member_role, u.username, u.display_name, u.role, u.team
         FROM chat_members m
         JOIN users u ON u.id = m.user_id
         WHERE m.conversation_id=?
-        ORDER BY u.username ASC
+        ORDER BY COALESCE(NULLIF(u.display_name, ''), u.username) ASC
         """,
         (conversation_id,),
     )
@@ -1139,7 +1182,7 @@ def chat_list_conversations(*, user_id: int, search: str = "", limit: int = 50) 
               LIMIT 1
             ) AS direct_peer_user_id,
             (
-              SELECT u.username
+              SELECT COALESCE(NULLIF(u.display_name, ''), u.username)
               FROM chat_members dm
               JOIN users u ON u.id=dm.user_id
               WHERE dm.conversation_id=c.id AND dm.user_id<>?
@@ -1179,7 +1222,7 @@ def chat_list_conversations(*, user_id: int, search: str = "", limit: int = 50) 
           AND (
             lower(COALESCE(c.title, '')) LIKE ?
             OR lower(COALESCE((
-              SELECT u.username
+              SELECT COALESCE(NULLIF(u.display_name, ''), u.username)
               FROM chat_members dm
               JOIN users u ON u.id=dm.user_id
               WHERE dm.conversation_id=c.id AND dm.user_id<>?
@@ -1206,7 +1249,7 @@ def chat_fetch_messages(*, conversation_id: int, limit: int = 40, before_id: Opt
     if before_id:
         cur.execute(
             """
-            SELECT m.*, u.username AS sender_username
+            SELECT m.*, COALESCE(NULLIF(u.display_name, ''), u.username) AS sender_username
             FROM chat_messages m
             JOIN users u ON u.id = m.sender_user_id
             WHERE m.conversation_id=? AND m.id < ?
@@ -1218,7 +1261,7 @@ def chat_fetch_messages(*, conversation_id: int, limit: int = 40, before_id: Opt
     else:
         cur.execute(
             """
-            SELECT m.*, u.username AS sender_username
+            SELECT m.*, COALESCE(NULLIF(u.display_name, ''), u.username) AS sender_username
             FROM chat_messages m
             JOIN users u ON u.id = m.sender_user_id
             WHERE m.conversation_id=?
@@ -1241,7 +1284,7 @@ def chat_fetch_reactions(message_ids: List[int]) -> Dict[int, List[Dict[str, Any
     placeholders = ",".join(["?"] * len(message_ids))
     cur.execute(
         f"""
-        SELECT r.message_id, r.user_id, r.emoji, u.username
+        SELECT r.message_id, r.user_id, r.emoji, COALESCE(NULLIF(u.display_name, ''), u.username) AS username
         FROM chat_reactions r
         JOIN users u ON u.id=r.user_id
         WHERE r.message_id IN ({placeholders})
@@ -1320,7 +1363,7 @@ def chat_get_message(message_id: int) -> Optional[Dict[str, Any]]:
     cur = conn.cursor()
     cur.execute(
         """
-        SELECT m.*, u.username AS sender_username
+        SELECT m.*, COALESCE(NULLIF(u.display_name, ''), u.username) AS sender_username
         FROM chat_messages m
         JOIN users u ON u.id = m.sender_user_id
         WHERE m.id=?
@@ -1626,7 +1669,7 @@ def task_get_instance(instance_id: int) -> Optional[Dict[str, Any]]:
             i.*, f.title, f.description, f.allowed_types_json, f.ai_enabled, f.repeat_enabled, f.repeat_type,
             f.repeat_interval_days, f.allow_resubmission, f.question_type, f.number_min, f.number_max, f.number_unit,
             f.priority, f.creator_user_id, f.creator_role,
-            u.username AS assigned_username
+            COALESCE(NULLIF(u.display_name, ''), u.username) AS assigned_username
         FROM task_instances i
         JOIN task_forms f ON f.id=i.form_id
         LEFT JOIN users u ON u.id=i.assigned_user_id
@@ -1651,7 +1694,8 @@ def task_list_instances_for_user(*, user_id: int, status: Optional[str] = None) 
             s.file_path AS response_file_path,
             s.file_path_2 AS response_file_path_2,
             s.distance_diff AS response_distance_diff,
-            s.fuel_consumed AS response_fuel_consumed
+            s.fuel_consumed AS response_fuel_consumed,
+            s.ai_result_reference AS ai_result_reference
         FROM task_instances i
         JOIN task_forms f ON f.id=i.form_id
         LEFT JOIN task_submissions s ON s.task_instance_id=i.id
@@ -1676,12 +1720,13 @@ def task_list_instances_for_scope(*, role: str, team: Optional[int]) -> List[Dic
             i.*, f.title, f.description, f.allowed_types_json, f.ai_enabled, f.repeat_enabled, f.repeat_type,
             f.repeat_interval_days, f.question_type, f.number_min, f.number_max, f.number_unit,
             f.priority, f.creator_role, f.creator_user_id,
-            u.username AS assigned_username,
+            COALESCE(NULLIF(u.display_name, ''), u.username) AS assigned_username,
             s.submitted_value AS response_value,
             s.file_path AS response_file_path,
             s.file_path_2 AS response_file_path_2,
             s.distance_diff AS response_distance_diff,
-            s.fuel_consumed AS response_fuel_consumed
+            s.fuel_consumed AS response_fuel_consumed,
+            s.ai_result_reference AS ai_result_reference
         FROM task_instances i
         JOIN task_forms f ON f.id=i.form_id
         LEFT JOIN users u ON u.id=i.assigned_user_id
@@ -2149,7 +2194,7 @@ def task_report_rows(*, role: str, team: Optional[int]) -> List[Dict[str, Any]]:
             q.unit,
             q.ideal_min,
             q.ideal_max,
-            u.username AS assigned_username,
+            COALESCE(NULLIF(u.display_name, ''), u.username) AS assigned_username,
             s.file_path,
             s.file_type,
             s.remarks,

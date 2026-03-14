@@ -6,6 +6,7 @@ itsdangerous==2.2.0
 passlib[bcrypt]==1.7.4
 bcrypt==3.2.2
 numpy==1.26.4
-opencv-python==4.10.0.84
+opencv-python-headless==4.10.0.84
 pytesseract==0.3.10
-ultralytics==8.2.103
+ultralytics==8.4.21
+openai==2.26.0
