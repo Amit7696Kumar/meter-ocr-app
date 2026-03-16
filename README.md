@@ -39,9 +39,6 @@
   - `export OCR_BACKEND=gcv` (GCV only)
   - `export OCR_BACKEND=tesseract` (local only)
 
-
-
-
 ## URLs
 - User upload page: http://localhost:8000/
 - Admin page: http://localhost:8000/admin
