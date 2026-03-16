@@ -5,6 +5,33 @@ function safeJsonParse(str) {
   try { return JSON.parse(str); } catch { return null; }
 }
 
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function getCsrfToken() {
+  return window.__CSRF_TOKEN || document.querySelector('meta[name="csrf-token"]')?.content || "";
+}
+
+function ensureCsrfInput(form) {
+  if (!form || String(form.method || "").toLowerCase() !== "post") return;
+  const token = getCsrfToken();
+  if (!token) return;
+  let input = form.querySelector('input[name="csrf_token"]');
+  if (!input) {
+    input = document.createElement("input");
+    input.type = "hidden";
+    input.name = "csrf_token";
+    form.appendChild(input);
+  }
+  input.value = token;
+}
+
 function buildUploadPreviewUrl(src) {
   const raw = String(src || "").trim();
   if (!raw) return "";
@@ -44,12 +71,14 @@ function enhanceFormSubmits() {
   qsa('form[method="post"]').forEach((form) => {
     if (form.dataset.submitEnhanced === "1") return;
     form.dataset.submitEnhanced = "1";
+    ensureCsrfInput(form);
     form.addEventListener("submit", (e) => {
       if (form.dataset.allowMultiSubmit === "1") return;
       if (form.dataset.submitting === "1") {
         e.preventDefault();
         return;
       }
+      ensureCsrfInput(form);
       const btn = form.querySelector('button[type="submit"], input[type="submit"]');
       if (!btn) return;
       form.dataset.submitting = "1";
@@ -196,7 +225,7 @@ function setupFiltering(tableId, searchId, meterSelectId, statusSelectId = null)
       const qOk = !q || text.includes(q);
       const cardStatus = (card.dataset.status || "").toLowerCase().trim();
       const statusOk = status === "all" || cardStatus.includes(status);
-      card.style.display = (meterOk && qOk && statusOk) ? "" : "grid";
+      card.style.display = (meterOk && qOk && statusOk) ? "" : "none";
     });
   };
 
@@ -767,9 +796,12 @@ function setupChatPopup() {
   }
 
   const api = async (url, opts = {}) => {
+    const headers = {"Content-Type": "application/json"};
+    const csrf = getCsrfToken();
+    if (csrf) headers["X-CSRF-Token"] = csrf;
     const res = await fetch(url, {
       method: opts.method || "GET",
-      headers: {"Content-Type": "application/json"},
+      headers,
       body: opts.body ? JSON.stringify(opts.body) : undefined,
       cache: "no-store",
     });
@@ -847,19 +879,20 @@ function setupChatPopup() {
       const name = c.display_name || "Chat";
       const initial = (name || "C").trim().charAt(0).toUpperCase();
       const statusText = Number(c.id || 0) > 0 ? "Existing Chat" : "No Chat Yet";
+      const previewClass = typing ? "chat-conv-preview is-typing" : "chat-conv-preview";
       return `
         <div class="chat-conv-item ${active ? "active" : ""}" data-conv-id="${c.id || 0}" data-peer-user-id="${c.peer_user_id || 0}">
           <div class="chat-conv-avatar">${initial}</div>
           <div class="chat-conv-main">
             <div class="chat-conv-top">
-              <div class="chat-conv-name">${name}</div>
-              <div class="small-muted">${relativeTime(c.last_message_at || c.updated_at)}</div>
+              <div class="chat-conv-name">${escapeHtml(name)}</div>
+              <div class="chat-conv-time">${escapeHtml(relativeTime(c.last_message_at || c.updated_at))}</div>
             </div>
             <div class="chat-conv-bottom">
-              <div class="chat-conv-preview">${preview}</div>
+              <div class="${previewClass}">${escapeHtml(preview)}</div>
               ${unreadBadge}
             </div>
-            <div class="small-muted" style="margin-top:2px;">${statusText}</div>
+            <div class="chat-conv-state">${escapeHtml(statusText)}</div>
           </div>
         </div>
       `;
@@ -875,7 +908,13 @@ function setupChatPopup() {
     }
     if (!msgEl) return;
     if (!messages || !messages.length) {
-      msgEl.innerHTML = `<div class="small-muted">No messages yet. Start the conversation.</div>`;
+      msgEl.innerHTML = `
+        <div class="chat-empty-state">
+          <div class="chat-empty-glyph">...</div>
+          <div class="chat-empty-title">No messages yet</div>
+          <div class="chat-empty-copy">Start the conversation from the message box below.</div>
+        </div>
+      `;
       return;
     }
     msgEl.innerHTML = messages.map(m => {
@@ -885,8 +924,8 @@ function setupChatPopup() {
       const sender = mine ? "You" : (m.sender_username || "User");
       return `
         <div class="chat-msg ${mine ? "mine" : ""}" data-mid="${m.id}">
-          <div class="chat-msg-meta">${sender} • ${m.created_at}${edited}</div>
-          <div class="chat-msg-body">${body}</div>
+          <div class="chat-msg-meta">${escapeHtml(sender)} • ${escapeHtml(m.created_at)}${escapeHtml(edited)}</div>
+          <div class="chat-msg-body">${escapeHtml(body)}</div>
         </div>
       `;
     }).join("");
@@ -970,12 +1009,28 @@ function setupChatPopup() {
       if (threadTitleEl) threadTitleEl.textContent = nm;
       if (threadAvatarEl) threadAvatarEl.textContent = nm.trim().charAt(0).toUpperCase();
       if (threadMetaEl) threadMetaEl.textContent = "No chat yet";
-      if (msgEl) msgEl.innerHTML = `<div class="small-muted">No messages yet. Start the conversation.</div>`;
+      if (msgEl) {
+        msgEl.innerHTML = `
+          <div class="chat-empty-state">
+            <div class="chat-empty-glyph">+</div>
+            <div class="chat-empty-title">No messages yet</div>
+            <div class="chat-empty-copy">Send the first message to start this conversation.</div>
+          </div>
+        `;
+      }
       return;
     }
     if (!convId) {
       if (threadTitleEl) threadTitleEl.textContent = "Select a conversation";
-      if (msgEl) msgEl.innerHTML = `<div class="small-muted">Pick a chat from left panel.</div>`;
+      if (msgEl) {
+        msgEl.innerHTML = `
+          <div class="chat-empty-state">
+            <div class="chat-empty-glyph">></div>
+            <div class="chat-empty-title">Pick a conversation</div>
+            <div class="chat-empty-copy">Select any member from the left panel to open the thread.</div>
+          </div>
+        `;
+      }
       return;
     }
     const conv = state.conversations.find(c => Number(c.id) === convId);
@@ -1186,4 +1241,10 @@ document.addEventListener("DOMContentLoaded", () => {
   }
   pollLatestReadings();
   setInterval(pollLatestReadings, 5000);
+});
+
+document.addEventListener("submit", (e) => {
+  const form = e.target;
+  if (!(form instanceof HTMLFormElement)) return;
+  ensureCsrfInput(form);
 });

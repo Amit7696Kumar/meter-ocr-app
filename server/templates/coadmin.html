@@ -14,7 +14,7 @@
   {% include "_partials/head_assets.html" %}
 </head>
 
-<body class="app-shell">
+<body class="app-shell coadmin-dashboard-page">
 
 <div class="nav">
   <div class="nav-inner">
@@ -40,7 +40,7 @@
 <div class="container">
   <div id="chatMeta" data-user-id="{{ user.id }}" data-role="{{ user.role }}" data-team="{{ user.team or '' }}"></div>
 
-  <div class="page-head">
+  <div class="page-head dashboard-page-head">
     <div>
       <h1 class="page-title">Team {{ team_id }} Operations</h1>
       <p class="page-lead">Track incoming readings, resolve alerts early, and keep your team within thresholds.</p>
@@ -54,7 +54,7 @@
     <div class="toast error">{{ request.query_params.get("err") }}</div>
   {% endif %}
 
-  <div class="kpi">
+  <div class="kpi dashboard-kpi">
     <div class="card">
       <div class="label">Total Task</div>
       <div class="value">{{ total_task_count or 0 }}</div>
@@ -69,11 +69,11 @@
     </div>
   </div>
 
-    <div class="panel">
+    <div class="panel dashboard-panel">
     <!-- READINGS -->
     <div class="panel-body">
 
-      <div class="filters" style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+      <div class="filters dashboard-filters" style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
         <input id="searchReadings" class="input" placeholder="Search by label, value, or user..." />
         <select id="meterFilter">
           <option value="all">All Task Titles</option>
@@ -94,7 +94,7 @@
       </div>
 
       {% if (readings and readings|length > 0) or (task_instances and task_instances|length > 0) %}
-      <div class="table-wrap">
+      <div class="table-wrap dashboard-table-wrap">
       <table class="table mobile-friendly-table" id="readingsTable">
         <thead>
           <tr>
@@ -109,7 +109,7 @@
         </thead>
         <tbody>
           {% for r in readings %}
-          <tr data-meter="{{ r.meter_type }}" data-user="{{ r.username }}" data-label="{{ r.label }}" data-created="{{ r.created_at }}" data-value="{{ r.value or '' }}" data-filename="{{ r.filename or '' }}" data-status="{{ (r.status or '')|lower }}" data-ocrjson="{{ (r.ocr_json or '')|e }}">
+          <tr data-meter="{{ r.meter_type }}" data-user="{{ r.username }}" data-team="{{ r.team or team_id }}" data-label="{{ r.label }}" data-created="{{ r.created_at }}" data-value="{{ r.value or '' }}" data-filename="{{ r.filename or '' }}" data-status="{{ (r.status or '')|lower }}" data-ocrjson="{{ (r.ocr_json or '')|e }}">
             <td>{{ r.id }}</td>
             <td>{{ r.created_at }}</td>
             <td><b>{{ r.label or r.meter_type }}</b></td>
@@ -138,7 +138,7 @@
           </tr>
           {% endfor %}
           {% for t in task_instances %}
-          <tr data-meter="task" data-user="{{ t.assigned_username or t.assigned_user_id }}" data-label="{{ t.title }}" data-created="{{ t.submitted_at or t.deadline_at }}" data-value="{{ '' if (t.response_value|string|lower) == 'overdue' else (t.response_value or '') }}" data-status="{{ (t.status or '')|lower }}" data-ai-result="{{ (t.ai_result_reference or '')|e }}">
+          <tr data-meter="task" data-user="{{ t.assigned_username or t.assigned_user_id }}" data-team="{{ t.assigned_team_id or team_id }}" data-label="{{ t.title }}" data-created="{{ t.submitted_at or t.deadline_at }}" data-value="{{ '' if (t.response_value|string|lower) == 'overdue' else (t.response_value or '') }}" data-status="{{ (t.status or '')|lower }}" data-ai-result="{{ (t.ai_result_reference or '')|e }}">
             <td>{{ t.id }}</td>
             <td>{{ t.submitted_at or t.deadline_at }}</td>
             <td><b>{{ t.title }}</b></td>
@@ -203,9 +203,12 @@
       <button class="modal-close-btn" type="button" id="modalClose" aria-label="Close image viewer">&times;</button>
     </div>
 
-    <div class="modal-body">
-      <div id="modalMeta" class="small-muted" style="margin-bottom:12px;"></div>
-      <div id="modalImages" class="imggrid"></div>
+    <div class="modal-body image-modal-layout">
+      <div class="image-modal-main">
+        <div id="modalMeta" class="small-muted" style="margin-bottom:12px;"></div>
+        <div id="modalImages" class="imggrid"></div>
+      </div>
+      <aside id="modalInfo" class="image-modal-info"></aside>
     </div>
   </div>
 </div>
@@ -220,7 +223,7 @@
       </div>
       <div style="display:flex; gap:8px;">
         <button class="btn small" type="button" id="chatNewGroupBtn">New Group</button>
-        <button class="btn small" type="button" id="chatCloseBtn">Done</button>
+        <button class="modal-close-btn" type="button" id="chatCloseBtn" aria-label="Close messages">&times;</button>
       </div>
     </div>
     <div class="modal-body chat-layout">
@@ -273,8 +276,9 @@ document.addEventListener("click", (e) => {
   const title = document.getElementById("modalTitle");
   const sub = document.getElementById("modalSub");
   const meta = document.getElementById("modalMeta");
+  const info = document.getElementById("modalInfo");
   const images = document.getElementById("modalImages");
-  if (!modal || !title || !sub || !images) return;
+  if (!modal || !title || !sub || !info || !images) return;
 
   const src = btn.getAttribute("data-src");
   const src2 = btn.getAttribute("data-src2");
@@ -282,6 +286,12 @@ document.addEventListener("click", (e) => {
   const row = btn.closest("tr");
   const ocrRaw = row?.dataset.ocrjson || "";
   const aiResult = row?.dataset.aiResult || "";
+  const label = row?.dataset.label || "Reading";
+  const user = row?.dataset.user || "-";
+  const team = row?.dataset.team || "{{ team_id }}";
+  const created = row?.dataset.created || "-";
+  const status = row?.dataset.status || "-";
+  const value = row?.dataset.value || "-";
   let detectorSource = "";
   try {
     const parsed = ocrRaw ? JSON.parse(ocrRaw) : null;
@@ -294,6 +304,31 @@ document.addEventListener("click", (e) => {
 
   title.textContent = src2 ? "Uploaded Images" : "Uploaded Image";
   sub.textContent = "Scroll to inspect the full image";
+  const esc = (value) => String(value || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/\"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+  const detailRows = [
+    { label: "User", value: user },
+    { label: "Team", value: team ? `Team ${team}` : "-" },
+    { label: "Task", value: label || "-" },
+    { label: "Status", value: status ? status.replace(/_/g, " ") : "-" },
+    { label: "Value", value },
+    { label: "Time", value: created },
+  ];
+  info.innerHTML = `
+    <div class="image-modal-info-title">Submission Details</div>
+    <div class="image-modal-info-list">
+      ${detailRows.map((item) => `
+        <div class="image-modal-info-row">
+          <div class="image-modal-info-label">${esc(item.label)}</div>
+          <div class="image-modal-info-value">${esc(item.value)}</div>
+        </div>
+      `).join("")}
+    </div>
+  `;
   if (meta) {
     meta.textContent = detectorSource ? `Detector: ${detectorSource}` : "";
   }

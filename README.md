@@ -22,12 +22,18 @@
 
 4) Run the server:
 
-   uvicorn server.app:app --reload --host 0.0.0.0 --port 8000
+   uvicorn server.app:app --host 0.0.0.0 --port 8000
+
+## Recommended Security Env Vars
+- `SESSION_SECRET_KEY`: set a long random secret for signed session cookies
+- `SESSION_COOKIE_HTTPS_ONLY=1`: enable when the site is served behind HTTPS
+- `SESSION_COOKIE_SAMESITE=lax`: default safe browser behavior for session cookies
+- `SESSION_MAX_AGE=604800`: example 7-day session lifetime in seconds
 
 ## Google Cloud Vision OCR (for uploaded images)
 - Install deps: `pip install -r server/requirements.txt`
 - Configure Google Vision API key:
-  - `export GCV_API_KEY=AIzaSyD1WDU2dSpcQKiXZuqPoUY_eybgvKBpR6M`
+  - `export GCV_API_KEY=your_google_vision_api_key`
 - OCR backend mode:
   - `export OCR_BACKEND=gcv_then_tesseract` (default, GCV first then local fallback)
   - `export OCR_BACKEND=gcv` (GCV only)

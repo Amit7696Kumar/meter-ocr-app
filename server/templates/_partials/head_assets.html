@@ -8,5 +8,7 @@
   <link rel="apple-touch-icon" href="/static/icons/newicon.png?v={{ static_version }}">
   <link rel="icon" type="image/png" sizes="1024x1024" href="/static/icons/newicon.png?v={{ static_version }}">
   <script>window.__ASSET_VERSION="{{ static_version }}";</script>
+  <meta name="csrf-token" content="{{ request.session.get('csrf_token', '') }}">
+  <script>window.__CSRF_TOKEN="{{ request.session.get('csrf_token', '') }}";</script>
   <link rel="stylesheet" href="/static/app.css?v={{ static_version }}">
   <script src="/static/app.js?v={{ static_version }}" defer></script>

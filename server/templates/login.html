@@ -27,6 +27,7 @@
           <h2>Sign in</h2>
         </div>
         <form method="post" action="/login" class="stack">
+          <input type="hidden" name="csrf_token" value="{{ request.session.get('csrf_token', '') }}">
           <label class="field authv2-field">
             <span>Email/Username</span>
             <div class="authv2-input-wrap">
@@ -72,6 +73,7 @@
           <p>Register your account today using a valid email and password.</p>
         </div>
         <form method="post" action="/register" class="stack">
+          <input type="hidden" name="csrf_token" value="{{ request.session.get('csrf_token', '') }}">
           <label class="field authv2-field">
             <span>Email</span>
             <div class="authv2-input-wrap">
@@ -111,23 +113,18 @@
 
       <div class="authv2-pane" data-auth-pane="forgot">
         <div class="authv2-pane-head">
-          <h2>Reset Password</h2>
-          <p>Enter your account and set a new password.</p>
+          <h2>Password Help</h2>
+          <p>For security, direct password reset is disabled. Submit your account details and contact an administrator.</p>
         </div>
         <form method="post" action="/forgot-password" class="stack">
+          <input type="hidden" name="csrf_token" value="{{ request.session.get('csrf_token', '') }}">
           <label class="field authv2-field">
             <span>Username or Email</span>
             <input class="input" name="identifier" placeholder="Enter username or email" required>
           </label>
-          <label class="field authv2-field">
-            <span>New Password</span>
-            <input class="input" name="new_password" type="password" placeholder="Enter new password" required>
-          </label>
-          <label class="field authv2-field">
-            <span>Confirm New Password</span>
-            <input class="input" name="confirm_password" type="password" placeholder="Confirm new password" required>
-          </label>
-          <button class="btn primary authv2-btn" type="submit">Reset Password</button>
+          <input type="hidden" name="new_password" value="disabled">
+          <input type="hidden" name="confirm_password" value="disabled">
+          <button class="btn primary authv2-btn" type="submit">Request Reset Help</button>
           <div class="authv2-row">
             <span class="small-muted">Remembered your password?</span>
             <a href="#" class="js-back-signin">Back to sign in</a>

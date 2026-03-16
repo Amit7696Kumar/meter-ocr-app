@@ -4,6 +4,9 @@ import uuid
 import time
 import re
 import hashlib
+import hmac
+import secrets
+import threading
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta
@@ -21,6 +24,7 @@ from starlette.concurrency import run_in_threadpool
 from starlette.responses import Response
 
 import bcrypt as pybcrypt
+import numpy as np
 from passlib.hash import pbkdf2_sha256
 
 from server.db import (
@@ -165,17 +169,46 @@ DEBUG_DIR.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(title="DET MONITORING APPLICATION")
 
+
+def _env_int(name: str, default: int) -> int:
+    raw = (os.getenv(name, "") or "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except Exception:
+        return default
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = (os.getenv(name, "") or "").strip().lower()
+    if not raw:
+        return default
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _session_cookie_samesite() -> str:
+    raw = (os.getenv("SESSION_COOKIE_SAMESITE", "lax") or "").strip().lower()
+    if raw in {"lax", "strict", "none"}:
+        return raw
+    return "lax"
+
+
+SESSION_SECRET_KEY = (os.getenv("SESSION_SECRET_KEY", "") or "").strip() or "CHANGE_ME_TO_A_RANDOM_LONG_SECRET"
+SESSION_MAX_AGE = max(300, _env_int("SESSION_MAX_AGE", 60 * 60 * 24 * 7))
+SESSION_COOKIE_HTTPS_ONLY = _env_bool("SESSION_COOKIE_HTTPS_ONLY", default=False)
+SESSION_COOKIE_SAMESITE = _session_cookie_samesite()
+
 # Session cookies
 app.add_middleware(
     SessionMiddleware,
-    secret_key=os.getenv("SESSION_SECRET_KEY", "CHANGE_ME_TO_A_RANDOM_LONG_SECRET"),
-    max_age=60 * 60 * 24 * 365 * 10,  # 10 years; logout clears it explicitly
-    same_site="lax",
-    https_only=False,
+    secret_key=SESSION_SECRET_KEY,
+    max_age=SESSION_MAX_AGE,
+    same_site=SESSION_COOKIE_SAMESITE,
+    https_only=SESSION_COOKIE_HTTPS_ONLY,
 )
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
-app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
 
 templates = Jinja2Templates(directory=TEMPLATE_DIR)
 
@@ -197,6 +230,166 @@ def _current_static_version() -> str:
 
 
 templates.env.globals["static_version"] = _current_static_version()
+
+_RATE_LIMIT_STATE: Dict[str, List[float]] = {}
+_RATE_LIMIT_LOCK = threading.Lock()
+_CSRF_EXEMPT_PATHS = {
+    "/auth/google/callback",
+}
+_UPLOAD_MAX_BYTES = max(1024 * 1024, _env_int("TASK_MAX_FILE_MB", 30) * 1024 * 1024)
+
+
+def _client_ip(request: Request) -> str:
+    forwarded = (request.headers.get("x-forwarded-for", "") or "").split(",")[0].strip()
+    if forwarded:
+        return forwarded
+    return request.client.host if request.client else "unknown"
+
+
+def _issue_csrf_token(request: Request) -> str:
+    token = request.session.get("csrf_token")
+    if token:
+        return str(token)
+    token = secrets.token_urlsafe(32)
+    request.session["csrf_token"] = token
+    return token
+
+
+def _csrf_token(request: Request) -> str:
+    return _issue_csrf_token(request)
+
+
+templates.env.globals["csrf_token"] = _csrf_token
+
+
+async def _require_csrf(request: Request) -> Optional[Response]:
+    if request.method.upper() not in {"POST", "PUT", "PATCH", "DELETE"}:
+        return None
+    if request.url.path in _CSRF_EXEMPT_PATHS:
+        return None
+    session_token = str(request.session.get("csrf_token") or "")
+    if not session_token:
+        _issue_csrf_token(request)
+        return JSONResponse({"error": "csrf_missing"}, status_code=403)
+    header_token = (request.headers.get("x-csrf-token", "") or "").strip()
+    form_token = ""
+    ctype = (request.headers.get("content-type", "") or "").lower()
+    if "application/x-www-form-urlencoded" in ctype or "multipart/form-data" in ctype:
+        try:
+            form = await request.form()
+            try:
+                form_token = str(form.get("csrf_token") or "").strip()
+            except Exception:
+                form_token = ""
+        except Exception:
+            form_token = ""
+    token = header_token or form_token
+    if token and hmac.compare_digest(token, session_token):
+        return None
+    log_event(
+        security_logger,
+        "WARNING",
+        "SECURITY_CSRF_REJECTED",
+        "Request rejected due to invalid CSRF token",
+        path=request.url.path,
+        ip=_client_ip(request),
+    )
+    return JSONResponse({"error": "csrf_invalid"}, status_code=403)
+
+
+def _check_rate_limit(bucket: str, key: str, *, limit: int, window_seconds: int) -> Optional[int]:
+    now = time.time()
+    state_key = f"{bucket}:{key}"
+    with _RATE_LIMIT_LOCK:
+        entries = [ts for ts in _RATE_LIMIT_STATE.get(state_key, []) if (now - ts) < window_seconds]
+        if len(entries) >= limit:
+            retry_after = max(1, int(window_seconds - (now - entries[0])))
+            _RATE_LIMIT_STATE[state_key] = entries
+            return retry_after
+        entries.append(now)
+        _RATE_LIMIT_STATE[state_key] = entries
+    return None
+
+
+def _auth_rate_limit(request: Request, bucket: str, subject: str = "", *, limit: int = 8, window_seconds: int = 300) -> Optional[int]:
+    ip = _client_ip(request)
+    base = f"{ip}|{subject.strip().lower()}"
+    return _check_rate_limit(bucket, base, limit=limit, window_seconds=window_seconds)
+
+
+def _clean_rel_upload_path(raw: str) -> Optional[str]:
+    rel = (raw or "").strip().lstrip("/")
+    if not rel or rel.startswith("_previews/"):
+        return None
+    return rel
+
+
+def _resolve_upload_relative_path(rel: str) -> Optional[Path]:
+    cleaned = _clean_rel_upload_path(rel)
+    if not cleaned:
+        return None
+    candidate = (Path(UPLOAD_DIR) / cleaned).resolve()
+    uploads_root = Path(UPLOAD_DIR).resolve()
+    try:
+        candidate.relative_to(uploads_root)
+    except ValueError:
+        return None
+    return candidate if candidate.is_file() else None
+
+
+def _image_bytes_look_valid(raw: bytes) -> bool:
+    if not raw:
+        return False
+    try:
+        arr = np.frombuffer(raw, dtype=np.uint8)
+        try:
+            import cv2
+        except Exception:
+            return False
+        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        return img is not None and getattr(img, "size", 0) > 0
+    except Exception:
+        return False
+
+
+def _video_bytes_look_valid(raw: bytes, ext: str) -> bool:
+    head = raw[:64]
+    ext = (ext or "").lower()
+    if ext == ".webm":
+        return head.startswith(b"\x1a\x45\xdf\xa3")
+    if ext in {".mp4", ".mov"}:
+        return len(head) >= 12 and head[4:8] == b"ftyp"
+    if ext == ".avi":
+        return len(head) >= 12 and head[:4] == b"RIFF" and head[8:12] == b"AVI "
+    if ext == ".mkv":
+        return head.startswith(b"\x1a\x45\xdf\xa3")
+    return False
+
+
+def _validate_upload_payload(raw: bytes, file_type: str, ext: str) -> Optional[str]:
+    if not raw:
+        return "Uploaded file is empty."
+    if len(raw) > _UPLOAD_MAX_BYTES and file_type != "video":
+        return "File exceeds the allowed size."
+    if file_type == "pdf":
+        if not raw.startswith(b"%PDF-"):
+            return "Uploaded PDF content is invalid."
+        return None
+    if file_type == "photo":
+        if ext not in {".jpg", ".jpeg", ".png", ".webp"}:
+            return "Unsupported image format."
+        if not _image_bytes_look_valid(raw):
+            return "Uploaded image content is invalid or unreadable."
+        return None
+    if file_type == "video":
+        if not _video_bytes_look_valid(raw, ext):
+            return "Uploaded video content does not match the selected format."
+        return None
+    return "Unsupported file type."
+
+
+def _upload_error_redirect(path: str, message: str) -> RedirectResponse:
+    return RedirectResponse(f"{path}{'&' if '?' in path else '?'}err={urllib.parse.quote_plus(message)}", status_code=303)
 
 
 def _resolve_upload_url_path(src: str) -> Optional[Path]:
@@ -348,6 +541,39 @@ async def request_logging_middleware(request: Request, call_next):
         if response is not None:
             response.headers["X-Request-Id"] = request_id
         clear_request_context()
+
+
+@app.middleware("http")
+async def security_headers_middleware(request: Request, call_next):
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    response.headers.setdefault(
+        "Permissions-Policy",
+        "camera=(), microphone=(), geolocation=()",
+    )
+
+    forwarded_proto = (request.headers.get("x-forwarded-proto", "") or "").split(",")[0].strip().lower()
+    is_https = request.url.scheme == "https" or forwarded_proto == "https"
+    if is_https:
+        response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+
+    if request.url.path in {"/login", "/force-password-change"}:
+        response.headers.setdefault("Cache-Control", "no-store")
+        response.headers.setdefault("Pragma", "no-cache")
+
+    return response
+
+
+@app.middleware("http")
+async def csrf_protection_middleware(request: Request, call_next):
+    if "session" in request.scope:
+        _issue_csrf_token(request)
+    rejection = await _require_csrf(request)
+    if rejection is not None:
+        return rejection
+    return await call_next(request)
 
 
 @app.exception_handler(RequestValidationError)
@@ -1006,6 +1232,20 @@ def _env_flag(name: str, default: bool = False) -> bool:
 def startup():
     init_db()
     log_event(system_logger, "INFO", "SYSTEM_STARTUP", "Application startup initialized")
+    if SESSION_SECRET_KEY == "CHANGE_ME_TO_A_RANDOM_LONG_SECRET":
+        log_event(
+            security_logger,
+            "WARNING",
+            "SECURITY_DEFAULT_SESSION_SECRET",
+            "SESSION_SECRET_KEY is using the built-in fallback; set a strong secret in the environment",
+        )
+    if not SESSION_COOKIE_HTTPS_ONLY:
+        log_event(
+            security_logger,
+            "WARNING",
+            "SECURITY_INSECURE_SESSION_COOKIE",
+            "Session cookies are not marked Secure; set SESSION_COOKIE_HTTPS_ONLY=1 when running behind HTTPS",
+        )
 
     # Start server immediately. OCR warmup is opt-in to avoid hard crashes
     # on machines where native OCR dependencies are unstable.
@@ -1062,6 +1302,12 @@ def login_page(request: Request):
 
 @app.post("/login")
 async def do_login(request: Request, username: str = Form(...), password: str = Form(...)):
+    retry_after = _auth_rate_limit(request, "login", username.strip(), limit=8, window_seconds=300)
+    if retry_after is not None:
+        resp = _auth_page(request, error="Too many login attempts. Please try again in a few minutes.")
+        resp.status_code = 429
+        resp.headers["Retry-After"] = str(retry_after)
+        return resp
     log_event(auth_logger, "INFO", "AUTH_LOGIN_ATTEMPT", "Login attempt", username=username.strip())
     u = get_user_by_username(username.strip())
     if not u or not verify_password(password, u["password_hash"]):
@@ -1099,6 +1345,12 @@ async def do_register(
     referral_id: Optional[str] = Form(None),
 ):
     email_norm = (email or "").strip().lower()
+    retry_after = _auth_rate_limit(request, "register", email_norm, limit=5, window_seconds=900)
+    if retry_after is not None:
+        resp = _auth_page(request, error="Too many registration attempts. Please wait and try again.")
+        resp.status_code = 429
+        resp.headers["Retry-After"] = str(retry_after)
+        return resp
     if not email_norm or "@" not in email_norm:
         return _auth_page(request, error="Enter a valid email address.")
     if len(password or "") < 6:
@@ -1142,25 +1394,24 @@ async def forgot_password(
     confirm_password: str = Form(...),
 ):
     ident = (identifier or "").strip()
-    if not ident:
-        return _auth_page(request, error="Enter username or email.")
-    if len(new_password or "") < 6:
-        return _auth_page(request, error="Password must be at least 6 characters.")
-    if new_password != confirm_password:
-        return _auth_page(request, error="Password and confirm password do not match.")
-
-    user = get_user_by_email(ident.lower()) or get_user_by_username(ident)
-    if not user:
-        return _auth_page(request, error="Account not found.")
-
-    try:
-        clear_force_change = user.get("role") in {"admin", "coadmin"}
-        update_user_password(int(user["id"]), hash_password(new_password), force_password_change=False if clear_force_change else None)
-        log_event(auth_logger, "INFO", "AUTH_PASSWORD_RESET", "Password reset completed", user_id=int(user["id"]))
-        return RedirectResponse("/login?info=Password reset successful. Please sign in.", status_code=303)
-    except Exception:
-        log_event(auth_logger, "ERROR", "AUTH_PASSWORD_RESET_FAIL", "Password reset failed", exc_info=True, identifier=ident)
-        return _auth_page(request, error="Unable to reset password right now.")
+    retry_after = _auth_rate_limit(request, "forgot_password", ident, limit=4, window_seconds=1800)
+    if retry_after is not None:
+        resp = _auth_page(request, error="Too many reset attempts. Please wait before trying again.")
+        resp.status_code = 429
+        resp.headers["Retry-After"] = str(retry_after)
+        return resp
+    log_event(
+        security_logger,
+        "WARNING",
+        "SECURITY_FORGOT_PASSWORD_BLOCKED",
+        "Unauthenticated password reset request blocked",
+        identifier=ident or None,
+        ip=_client_ip(request),
+    )
+    return RedirectResponse(
+        "/login?info=Password reset is disabled for security. Contact an administrator to reset your account.",
+        status_code=303,
+    )
 
 
 @app.get("/force-password-change", response_class=HTMLResponse)
@@ -1224,6 +1475,9 @@ async def force_password_change_submit(
 
 @app.get("/auth/google/start")
 def auth_google_start(request: Request):
+    retry_after = _auth_rate_limit(request, "google_auth_start", "", limit=10, window_seconds=300)
+    if retry_after is not None:
+        return RedirectResponse("/login?error=Too many authentication attempts. Please try again later.", status_code=303)
     client_id = (os.getenv("GOOGLE_CLIENT_ID", "") or "").strip()
     if not client_id:
         return RedirectResponse("/login?error=Google login is not configured.", status_code=303)
@@ -1481,11 +1735,37 @@ async def upload_meter_image(
     )
 
     # Save upload
+    raw_image = await image.read()
+    validation_error = _validate_upload_payload(raw_image, "photo", ext)
+    if validation_error:
+        return templates.TemplateResponse(
+            "user.html",
+            {
+                "request": request,
+                "user": u,
+                "readings": _augment_readings(_filter_today_readings(fetch_readings_by_user(int(u["id"])))),
+                "error": validation_error,
+            },
+            status_code=400,
+        )
     with open(filepath, "wb") as f:
-        f.write(await image.read())
+        f.write(raw_image)
     if filepath_2 and image2 is not None:
+        raw_image_2 = await image2.read()
+        validation_error_2 = _validate_upload_payload(raw_image_2, "photo", ext2)
+        if validation_error_2:
+            return templates.TemplateResponse(
+                "user.html",
+                {
+                    "request": request,
+                    "user": u,
+                    "readings": _augment_readings(_filter_today_readings(fetch_readings_by_user(int(u["id"])))),
+                    "error": validation_error_2,
+                },
+                status_code=400,
+            )
         with open(filepath_2, "wb") as f:
-            f.write(await image2.read())
+            f.write(raw_image_2)
 
     ocr_result: Dict[str, Any] = {}
     numeric_value: Optional[str] = None
@@ -2015,6 +2295,9 @@ async def tasks_submit(
         file_size = len(raw1) + len(raw2)
         if file_size > (max_mb * 1024 * 1024 * 2):
             return RedirectResponse("/tasks?err=file_too_large", status_code=303)
+        payload_error = _validate_upload_payload(raw1, "photo", ext1) or _validate_upload_payload(raw2, "photo", ext2)
+        if payload_error:
+            return _upload_error_redirect("/tasks", payload_error)
         now = datetime.now()
         subdir = os.path.join(UPLOAD_DIR, "tasks", now.strftime("%Y"), now.strftime("%m"))
         os.makedirs(subdir, exist_ok=True)
@@ -2042,6 +2325,9 @@ async def tasks_submit(
         file_size = len(raw)
         if file_size > (max_mb * 1024 * 1024):
             return RedirectResponse("/tasks?err=file_too_large", status_code=303)
+        payload_error = _validate_upload_payload(raw, detected_type, ext)
+        if payload_error:
+            return _upload_error_redirect("/tasks", payload_error)
         now = datetime.now()
         subdir = os.path.join(UPLOAD_DIR, "tasks", now.strftime("%Y"), now.strftime("%m"))
         os.makedirs(subdir, exist_ok=True)
@@ -2356,6 +2642,20 @@ def admin_page(request: Request):
     return templates.TemplateResponse(
         "admin.html",
         context,
+    )
+
+
+@app.get("/uploads/{upload_path:path}")
+def serve_upload(request: Request, upload_path: str):
+    u = current_user(request)
+    if not require_role(u, ["user", "coadmin", "admin"]):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    source_path = _resolve_upload_relative_path(upload_path)
+    if source_path is None:
+        raise HTTPException(status_code=404, detail="File not found")
+    return FileResponse(
+        path=source_path,
+        headers={"Cache-Control": "private, max-age=300"},
     )
 
 

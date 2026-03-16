@@ -4,7 +4,7 @@
   {% set page_title = "Tasks — DET MONITORING APPLICATION" %}
   {% include "_partials/head_assets.html" %}
 </head>
-<body class="app-shell tasks-v2">
+<body class="app-shell tasks-v2 tasks-page">
 <div class="nav">
   <div class="nav-inner">
     {% set brand_subtitle = "Task Module" %}
@@ -29,12 +29,48 @@
 
 <div class="container">
   <div id="chatMeta" data-user-id="{{ user.id }}" data-role="{{ user.role }}" data-team="{{ user.team or '' }}"></div>
-  <div class="page-head">
-    <div>
+  <section class="tasks-hero">
+    <div class="tasks-hero-copy">
+      <div class="tasks-eyebrow">Task Control</div>
       <h1 class="page-title">Task Overview</h1>
-      <p class="page-lead">Track and manage tasks with ease. Monitor pending, submitted, and overdue tasks.</p>
+      <p class="page-lead">Track task progress, create new assignments, and keep field submissions moving without friction.</p>
+      <div class="tasks-hero-actions">
+        {% if user.role == "admin" %}
+        <a class="btn primary" href="/admin">Open Dashboard</a>
+        {% elif user.role == "coadmin" %}
+        <a class="btn primary" href="/coadmin/{{ user.team }}">Open Dashboard</a>
+        {% else %}
+        <a class="btn primary" href="/settings">Account Settings</a>
+        {% endif %}
+        <button class="btn" type="button" id="openChatPopupBtnHero" onclick="window.__openChatPopup && window.__openChatPopup()">Open Messages</button>
+      </div>
     </div>
-  </div>
+    <div class="tasks-hero-stats">
+      <div class="tasks-stat">
+        <div class="tasks-stat-label">Role</div>
+        <div class="tasks-stat-value">{{ user.role|upper }}</div>
+      </div>
+      {% if user.role == "user" %}
+      <div class="tasks-stat">
+        <div class="tasks-stat-label">Pending</div>
+        <div class="tasks-stat-value">{{ summary.pending }}</div>
+      </div>
+      <div class="tasks-stat">
+        <div class="tasks-stat-label">Overdue</div>
+        <div class="tasks-stat-value">{{ summary.overdue }}</div>
+      </div>
+      {% else %}
+      <div class="tasks-stat">
+        <div class="tasks-stat-label">Task Forms</div>
+        <div class="tasks-stat-value">{{ forms|length if forms else 0 }}</div>
+      </div>
+      <div class="tasks-stat">
+        <div class="tasks-stat-label">Active Instances</div>
+        <div class="tasks-stat-value">{{ instances|length if instances else 0 }}</div>
+      </div>
+      {% endif %}
+    </div>
+  </section>
   {% include "_partials/install_hint.html" %}
 
   {% if error %}
@@ -42,7 +78,7 @@
   {% endif %}
 
   {% if user.role == "user" %}
-  <div class="kpi">
+  <div class="kpi tasks-kpi">
     <div class="card kpi-total"><div class="label">Total</div><div class="value">{{ summary.total }}</div></div>
     <div class="card kpi-pending"><div class="label">Pending</div><div class="value">{{ summary.pending }}</div></div>
     <div class="card kpi-submitted"><div class="label">Submitted</div><div class="value">{{ summary.submitted }}</div></div>
@@ -51,7 +87,7 @@
   {% endif %}
 
   {% if user.role in ["admin", "coadmin"] %}
-  <div class="panel">
+  <div class="panel tasks-create-panel">
     <div class="panel-header">
       <div>
         <div class="panel-title">Create Task</div>
@@ -59,91 +95,133 @@
       </div>
     </div>
     <div class="panel-body">
-      <form method="post" action="/tasks/create" class="stack">
-        <label class="field">
-          <span>Task Title</span>
-          <select class="input" name="title" id="taskTitleSelect" required>
-            <option value="Earthing Reading">Earthing Reading</option>
-            <option value="Temperature Reading">Temperature Reading</option>
-            <option value="Voltage Reading">Voltage Reading</option>
-            <option value="Odometer Reading">Odometer Reading</option>
-            <option value="Fire Point Check">Fire Point Check</option>
-            <option value="Custom">Custom</option>
-          </select>
-        </label>
-
-        <label class="field" id="customTaskTitleWrap" style="display:none;">
-          <span>Custom Task Title</span>
-          <input class="input" name="custom_title" id="customTaskTitleInput" placeholder="Enter custom task title">
-        </label>
-
-        <label class="field">
-          <span>Description / Instructions</span>
-          <textarea class="input" name="description" rows="3" placeholder="Write clear submission instructions"></textarea>
-        </label>
-
-        <label class="field">
-          <span id="idealValueLabel">Ideal Value (max)</span>
-          <input class="input" type="number" step="any" name="ideal_value" id="idealValueInput" placeholder="e.g. 2.0 for earthing">
-        </label>
-
-        <div class="grid2">
-          <label class="field">
-            <span>Assign Scope</span>
-            <select class="input" name="assigned_scope" id="assignedScope" required>
-              <option value="users">Specific Users</option>
-              <option value="team">Whole Team</option>
-            </select>
-          </label>
-
-          <div class="field" id="assignTargetField">
-            <span id="assignTargetLabel">Assign Users</span>
-            <div id="assignUsersControls">
-              <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
-                <select class="input" id="assignedUserPicker" style="min-width:280px;">
-                  <option value="">Select user</option>
-                  {% for x in assignable_users %}
-                    <option value="{{ x.id }}">{{ x.username }} (ID {{ x.id }})</option>
-                  {% endfor %}
+      <form method="post" action="/tasks/create" class="stack tasks-create-form">
+        <input type="hidden" name="csrf_token" value="{{ request.session.get('csrf_token', '') }}">
+        <div class="tasks-create-grid">
+          <section class="tasks-create-section">
+            <div class="tasks-create-section-head">
+              <div class="tasks-create-section-title">Task Basics</div>
+              <div class="tasks-create-section-sub">Define the task title, instructions, and ideal target.</div>
+            </div>
+            <div class="stack">
+              <label class="field">
+                <span>Task Title</span>
+                <select class="input" name="title" id="taskTitleSelect" required>
+                  <option value="Earthing Reading">Earthing Reading</option>
+                  <option value="Temperature Reading">Temperature Reading</option>
+                  <option value="Voltage Reading">Voltage Reading</option>
+                  <option value="Odometer Reading">Odometer Reading</option>
+                  <option value="Fire Point Check">Fire Point Check</option>
+                  <option value="Custom">Custom</option>
                 </select>
-                <button class="btn small" type="button" id="addAssignedUserBtn">Add User</button>
-              </div>
-              <div id="assignedUsersList" style="display:flex; gap:8px; flex-wrap:wrap; margin-top:8px;"></div>
-              <div id="assignedUsersHidden"></div>
-            </div>
-            <div id="assignTeamControls" style="display:none;">
-              <select class="input" name="assigned_team_id" id="assignedTeamSelect">
-                {% if user.role == "admin" %}
-                  <option value="">Select team</option>
-                  {% for t in [1,2,3,4,5,6] %}
-                  <option value="{{ t }}">Team{{ t }}</option>
-                  {% endfor %}
-                {% else %}
-                  <option value="{{ user.team }}">Team{{ user.team }}</option>
-                {% endif %}
-              </select>
-            </div>
-          </div>
-        </div>
+              </label>
 
-        <div class="grid2">
-          <label class="field">
-            <span>Deadline Date</span>
-            <input class="input" type="date" name="deadline_date" required>
-          </label>
-          <label class="field">
-            <span>Deadline Time</span>
-            <input class="input" type="time" name="deadline_time" required>
-          </label>
-        </div>
+              <label class="field" id="customTaskTitleWrap" style="display:none;">
+                <span>Custom Task Title</span>
+                <input class="input" name="custom_title" id="customTaskTitleInput" placeholder="Enter custom task title">
+              </label>
 
-        <div class="field">
-          <span>Allowed Response Types</span>
-          <div class="filters">
-            <label><input type="checkbox" name="allowed_types" value="pdf"> PDF</label>
-            <label><input type="checkbox" name="allowed_types" value="photo" checked> Photo</label>
-            <label><input type="checkbox" name="allowed_types" value="video"> Video</label>
-          </div>
+              <label class="field">
+                <span>Description / Instructions</span>
+                <textarea class="input" name="description" rows="4" placeholder="Write clear submission instructions"></textarea>
+              </label>
+
+              <label class="field">
+                <span id="idealValueLabel">Ideal Value (max)</span>
+                <input class="input" type="number" step="any" name="ideal_value" id="idealValueInput" placeholder="e.g. 2.0 for earthing">
+              </label>
+            </div>
+          </section>
+
+          <section class="tasks-create-section">
+            <div class="tasks-create-section-head">
+              <div class="tasks-create-section-title">Assignment & Schedule</div>
+              <div class="tasks-create-section-sub">Assign to multiple users at once or target an entire team.</div>
+            </div>
+            <div class="tasks-assign-layout">
+              <section class="tasks-subsection">
+                <div class="tasks-subsection-head">
+                  <div class="tasks-subsection-title">Assignment</div>
+                  <div class="tasks-subsection-copy">Choose whether this task goes to selected members or an entire team.</div>
+                </div>
+                <div class="stack">
+                  <label class="field">
+                    <span>Assign Scope</span>
+                    <select class="input" name="assigned_scope" id="assignedScope" required>
+                      <option value="users">Specific Users</option>
+                      <option value="team">Whole Team</option>
+                    </select>
+                  </label>
+
+                  <div class="field" id="assignTargetField">
+                    <span id="assignTargetLabel">Assign Users</span>
+                    <div id="assignUsersControls" class="tasks-user-picker">
+                      <div class="tasks-user-picker-toolbar">
+                        <div class="small-muted">Choose one or more users</div>
+                        <div class="tasks-user-picker-actions">
+                          <button class="btn small" type="button" id="selectAllAssignedUsersBtn">Select All</button>
+                          <button class="btn small" type="button" id="clearAssignedUsersBtn">Clear</button>
+                        </div>
+                      </div>
+                      <input class="input tasks-user-search" type="search" id="assignedUsersSearch" placeholder="Search users by name or ID">
+                      <div class="tasks-user-multiselect" id="assignedUsersMulti" role="listbox" aria-label="Assign multiple users" aria-multiselectable="true">
+                        {% for x in assignable_users %}
+                          <button class="tasks-user-option" type="button" data-user-id="{{ x.id }}" data-user-label="{{ x.username }} (ID {{ x.id }})" aria-pressed="false">
+                            <span class="tasks-user-option-name">{{ x.username }}</span>
+                            <span class="tasks-user-option-meta">ID {{ x.id }}</span>
+                          </button>
+                        {% endfor %}
+                      </div>
+                      <div class="small-muted">Click users to toggle selection. Selected users stay highlighted until you clear them.</div>
+                      <div id="assignedUsersList" class="tasks-selected-users"></div>
+                      <div id="assignedUsersHidden"></div>
+                    </div>
+                    <div id="assignTeamControls" class="tasks-team-picker" style="display:none;">
+                      <div class="small-muted">Assign this task to every user in the selected team.</div>
+                      <select class="input" name="assigned_team_id" id="assignedTeamSelect">
+                        {% if user.role == "admin" %}
+                          <option value="">Select team</option>
+                          {% for t in [1,2,3,4,5,6] %}
+                          <option value="{{ t }}">Team{{ t }}</option>
+                          {% endfor %}
+                        {% else %}
+                          <option value="{{ user.team }}">Team{{ user.team }}</option>
+                        {% endif %}
+                      </select>
+                    </div>
+                  </div>
+                </div>
+              </section>
+
+              <section class="tasks-subsection">
+                <div class="tasks-subsection-head">
+                  <div class="tasks-subsection-title">Schedule & Response</div>
+                  <div class="tasks-subsection-copy">Set the deadline and define how users are allowed to respond.</div>
+                </div>
+                <div class="stack">
+                  <div class="grid2">
+                    <label class="field">
+                      <span>Deadline Date</span>
+                      <input class="input" type="date" name="deadline_date" required>
+                    </label>
+                    <label class="field">
+                      <span>Deadline Time</span>
+                      <input class="input" type="time" name="deadline_time" required>
+                    </label>
+                  </div>
+
+                  <div class="field">
+                    <span>Allowed Response Types</span>
+                    <div class="filters tasks-inline-options">
+                      <label><input type="checkbox" name="allowed_types" value="pdf"> PDF</label>
+                      <label><input type="checkbox" name="allowed_types" value="photo" checked> Photo</label>
+                      <label><input type="checkbox" name="allowed_types" value="video"> Video</label>
+                    </div>
+                  </div>
+                </div>
+              </section>
+            </div>
+          </section>
         </div>
 
         <input type="hidden" name="question_type" value="upload">
@@ -151,11 +229,11 @@
         <input type="hidden" name="number_min" value="">
         <input type="hidden" name="number_max" value="">
 
-        <div class="filters">
+        <div class="filters tasks-inline-options">
           <label><input type="checkbox" name="ai_enabled" value="1"> Execute AI on submitted response</label>
         </div>
 
-        <div class="filters">
+        <div class="filters tasks-inline-options">
           <label><input type="checkbox" name="repeat_enabled" value="1" id="repeatEnabled"> Auto-create again</label>
           <select class="input" name="repeat_type" id="repeatType" style="max-width:220px;" disabled>
             <option value="daily">Daily</option>
@@ -175,7 +253,7 @@
   {% if user.role == "user" %}
   <div style="margin-top:16px;">
     {% if user.role == "user" %}
-    <div class="task-filters" style="margin-bottom:12px;">
+    <div class="task-filters tasks-status-filters" style="margin-bottom:12px;">
       <a class="task-filter-pill {% if status_filter == 'all' %}active{% endif %}" href="/tasks?status=all">All</a>
       <a class="task-filter-pill {% if status_filter == 'pending' %}active{% endif %}" href="/tasks?status=pending">Pending</a>
       <a class="task-filter-pill {% if status_filter == 'submitted' %}active{% endif %}" href="/tasks?status=submitted">Submitted</a>
@@ -184,9 +262,9 @@
     {% endif %}
     <div>
       {% if instances %}
-      <div class="task-card-list">
+      <div class="task-card-list tasks-card-list">
         {% for t in instances %}
-        <article class="task-instance-card">
+        <article class="task-instance-card task-instance-card-rich">
           <div class="task-card-row">
             <div class="task-id">ID {{ t.id }}</div>
             <span class="pill task-status-pill {% if t.status == 'overdue' %}high{% elif t.status in ['submitted','late','completed'] %}ok{% else %}low{% endif %}">{{ t.status }}</span>
@@ -207,6 +285,7 @@
                 <span class="small-muted">Already submitted</span>
               {% else %}
                 <form method="post" action="/tasks/{{ t.id }}/submit" enctype="multipart/form-data" class="stack">
+                  <input type="hidden" name="csrf_token" value="{{ request.session.get('csrf_token', '') }}">
                   {% if (t.title or '')|lower == 'odometer reading' %}
                   <label class="field">
                     <span>Start Image</span>
@@ -262,7 +341,7 @@
       </div>
       <div style="display:flex; gap:8px;">
         <button class="btn small" type="button" id="chatNewGroupBtn">New Group</button>
-        <button class="btn small" type="button" id="chatCloseBtn">Done</button>
+        <button class="modal-close-btn" type="button" id="chatCloseBtn" aria-label="Close messages">&times;</button>
       </div>
     </div>
     <div class="modal-body chat-layout">
@@ -311,25 +390,38 @@
   const assignUsersControls = document.getElementById("assignUsersControls");
   const assignTeamControls = document.getElementById("assignTeamControls");
   const assignedTeamSelect = document.getElementById("assignedTeamSelect");
-  const assignedUserPicker = document.getElementById("assignedUserPicker");
-  const addAssignedUserBtn = document.getElementById("addAssignedUserBtn");
+  const assignedUsersMulti = document.getElementById("assignedUsersMulti");
+  const assignedUsersSearch = document.getElementById("assignedUsersSearch");
+  const selectAllAssignedUsersBtn = document.getElementById("selectAllAssignedUsersBtn");
+  const clearAssignedUsersBtn = document.getElementById("clearAssignedUsersBtn");
   const assignedUsersList = document.getElementById("assignedUsersList");
   const assignedUsersHidden = document.getElementById("assignedUsersHidden");
   const selectedAssignedUsers = new Map();
+
+  function reorderAssignedUserOptions() {
+    if (!assignedUsersMulti) return;
+    const options = Array.from(assignedUsersMulti.querySelectorAll("[data-user-id]"));
+    const selected = options.filter((option) => option.classList.contains("is-selected"));
+    const unselected = options.filter((option) => !option.classList.contains("is-selected"));
+    [...selected, ...unselected].forEach((option) => assignedUsersMulti.appendChild(option));
+  }
+
+  function filterAssignedUserOptions() {
+    if (!assignedUsersMulti) return;
+    const query = String(assignedUsersSearch?.value || "").trim().toLowerCase();
+    Array.from(assignedUsersMulti.querySelectorAll("[data-user-id]")).forEach((option) => {
+      const label = String(option.getAttribute("data-user-label") || "").toLowerCase();
+      option.style.display = !query || label.includes(query) ? "" : "none";
+    });
+  }
 
   function renderAssignedUsers() {
     if (!assignedUsersList || !assignedUsersHidden) return;
     assignedUsersList.innerHTML = "";
     assignedUsersHidden.innerHTML = "";
+    reorderAssignedUserOptions();
+    filterAssignedUserOptions();
     selectedAssignedUsers.forEach((label, id) => {
-      const chip = document.createElement("span");
-      chip.className = "pill low";
-      chip.style.display = "inline-flex";
-      chip.style.alignItems = "center";
-      chip.style.gap = "6px";
-      chip.innerHTML = `${label} <button type="button" class="btn small" data-remove-user="${id}" style="height:24px; padding:0 6px;">x</button>`;
-      assignedUsersList.appendChild(chip);
-
       const hidden = document.createElement("input");
       hidden.type = "hidden";
       hidden.name = "assigned_user_ids";
@@ -338,25 +430,57 @@
     });
   }
 
-  function addAssignedUserFromPicker() {
-    if (!assignedUserPicker) return;
-    const id = (assignedUserPicker.value || "").trim();
-    if (!id) return;
-    const text = assignedUserPicker.options[assignedUserPicker.selectedIndex]?.text || id;
-    if (!selectedAssignedUsers.has(id)) {
-      selectedAssignedUsers.set(id, text);
-      renderAssignedUsers();
-    }
+  function syncAssignedUsersFromMultiSelect() {
+    if (!assignedUsersMulti) return;
+    selectedAssignedUsers.clear();
+    Array.from(assignedUsersMulti.querySelectorAll("[data-user-id].is-selected")).forEach((option) => {
+      const id = String(option.getAttribute("data-user-id") || "").trim();
+      if (!id) return;
+      selectedAssignedUsers.set(id, option.getAttribute("data-user-label") || option.textContent || id);
+    });
+    renderAssignedUsers();
   }
 
-  addAssignedUserBtn?.addEventListener("click", addAssignedUserFromPicker);
-  assignedUserPicker?.addEventListener("change", addAssignedUserFromPicker);
+  assignedUsersMulti?.addEventListener("click", (e) => {
+    const target = e.target.closest("[data-user-id]");
+    if (!target) return;
+    e.preventDefault();
+    const next = !target.classList.contains("is-selected");
+    target.classList.toggle("is-selected", next);
+    target.setAttribute("aria-pressed", next ? "true" : "false");
+    syncAssignedUsersFromMultiSelect();
+  });
+  assignedUsersSearch?.addEventListener("input", filterAssignedUserOptions);
+  selectAllAssignedUsersBtn?.addEventListener("click", () => {
+    if (!assignedUsersMulti) return;
+    Array.from(assignedUsersMulti.querySelectorAll("[data-user-id]")).forEach((option) => {
+      if (option.style.display === "none") return;
+      option.classList.add("is-selected");
+      option.setAttribute("aria-pressed", "true");
+    });
+    syncAssignedUsersFromMultiSelect();
+  });
+  clearAssignedUsersBtn?.addEventListener("click", () => {
+    if (!assignedUsersMulti) return;
+    Array.from(assignedUsersMulti.querySelectorAll("[data-user-id]")).forEach((option) => {
+      option.classList.remove("is-selected");
+      option.setAttribute("aria-pressed", "false");
+    });
+    syncAssignedUsersFromMultiSelect();
+  });
   assignedUsersList?.addEventListener("click", (e) => {
     const btn = e.target.closest("[data-remove-user]");
     if (!btn) return;
     const id = btn.getAttribute("data-remove-user");
     if (!id) return;
     selectedAssignedUsers.delete(id);
+    if (assignedUsersMulti) {
+      const option = assignedUsersMulti.querySelector(`[data-user-id="${CSS.escape(String(id))}"]`);
+      if (option) {
+        option.classList.remove("is-selected");
+        option.setAttribute("aria-pressed", "false");
+      }
+    }
     renderAssignedUsers();
   });
   function syncScope() {
@@ -365,14 +489,24 @@
     if (assignTargetLabel) assignTargetLabel.textContent = isTeam ? "Assign Team" : "Assign Users";
     if (assignUsersControls) assignUsersControls.style.display = isTeam ? "none" : "";
     if (assignTeamControls) assignTeamControls.style.display = isTeam ? "" : "none";
-    if (assignedUserPicker) assignedUserPicker.disabled = isTeam;
-    if (addAssignedUserBtn) addAssignedUserBtn.disabled = isTeam;
+    if (assignedUsersMulti) {
+      assignedUsersMulti.setAttribute("aria-disabled", isTeam ? "true" : "false");
+      assignedUsersMulti.classList.toggle("is-disabled", isTeam);
+    }
+    if (selectAllAssignedUsersBtn) selectAllAssignedUsersBtn.disabled = isTeam;
+    if (clearAssignedUsersBtn) clearAssignedUsersBtn.disabled = isTeam;
     if (assignedTeamSelect) {
       assignedTeamSelect.disabled = !isTeam;
       assignedTeamSelect.required = isTeam;
     }
     if (isTeam && selectedAssignedUsers.size > 0) {
       selectedAssignedUsers.clear();
+      if (assignedUsersMulti) {
+        Array.from(assignedUsersMulti.querySelectorAll("[data-user-id]")).forEach((option) => {
+          option.classList.remove("is-selected");
+          option.setAttribute("aria-pressed", "false");
+        });
+      }
       renderAssignedUsers();
     }
   }

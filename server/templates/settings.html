@@ -5,7 +5,7 @@
   {% include "_partials/head_assets.html" %}
 </head>
 
-<body class="app-shell">
+<body class="app-shell settings-page">
 
 <div class="nav">
   <div class="nav-inner">
@@ -34,6 +34,9 @@
       <p class="page-lead">Manage team members and account actions.</p>
     </div>
   </div>
+  <div class="settings-mobile-signout">
+    <a class="btn btn-signout" href="/logout">Sign Out</a>
+  </div>
 
   {% if request.query_params.get("info") %}
     <div class="toast ok">{{ request.query_params.get("info") }}</div>
@@ -52,6 +55,7 @@
     </div>
     <div class="panel-body">
       <form method="post" action="/team-members/assign" class="stack">
+        <input type="hidden" name="csrf_token" value="{{ request.session.get('csrf_token', '') }}">
         <label class="stack">
           <span class="small-muted">Unassigned User</span>
           <select class="input" name="user_id" required {% if not unassigned_users %}disabled{% endif %}>
@@ -107,6 +111,7 @@
         {% for member in team_members %}
           {% set member_label = (member.display_name or '').strip() or ((member.email or '').split('@')[0] if member.email else '') or ((member.username or '').split('@')[0] if '@' in (member.username or '') else (member.username or '')) %}
           <form method="post" action="/team-members/remove" class="actions" style="justify-content:space-between; align-items:center; gap:12px; padding:12px 0; border-bottom:1px solid rgba(148,163,184,.2);">
+            <input type="hidden" name="csrf_token" value="{{ request.session.get('csrf_token', '') }}">
             <div>
               <div><strong>{{ member_label }}</strong></div>
               <div class="small-muted">Team {{ member.team }}</div>
@@ -138,6 +143,7 @@
     <div class="panel-body">
       <div class="grid2" style="align-items:start;">
         <form method="post" action="/settings/username" class="stack">
+          <input type="hidden" name="csrf_token" value="{{ request.session.get('csrf_token', '') }}">
           <label class="stack">
             <span class="small-muted">Username</span>
             <input class="input" type="text" name="username" value="{{ user.username or '' }}" required>
@@ -148,6 +154,7 @@
         </form>
 
         <form method="post" action="/settings/password" class="stack">
+          <input type="hidden" name="csrf_token" value="{{ request.session.get('csrf_token', '') }}">
           <label class="stack">
             <span class="small-muted">New Password</span>
             <input class="input" type="password" name="new_password" required>
@@ -160,9 +167,6 @@
             <button class="btn primary" type="submit">Change Password</button>
           </div>
         </form>
-      </div>
-      <div class="actions" style="margin-top:16px;">
-        <a class="btn btn-signout" href="/logout">Logout</a>
       </div>
     </div>
   </div>
@@ -182,7 +186,7 @@
       </div>
       <div style="display:flex; gap:8px;">
         <button class="btn small" type="button" id="chatNewGroupBtn">New Group</button>
-        <button class="btn small" type="button" id="chatCloseBtn">Done</button>
+        <button class="modal-close-btn" type="button" id="chatCloseBtn" aria-label="Close messages">&times;</button>
       </div>
     </div>
     <div class="modal-body chat-layout">
