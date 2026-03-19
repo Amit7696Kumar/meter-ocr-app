@@ -218,6 +218,12 @@
                       <label><input type="checkbox" name="allowed_types" value="video"> Video</label>
                     </div>
                   </div>
+
+                  <label class="field" id="imageUploadCountField">
+                    <span>Number Of Images</span>
+                    <input class="input" type="number" min="1" step="1" name="image_upload_count" id="imageUploadCountSelect" value="1" placeholder="Enter number of images">
+                    <div class="small-muted">Type how many images should be required from the user. Odometer keeps its separate start/end flow.</div>
+                  </label>
                 </div>
               </section>
             </div>
@@ -230,7 +236,7 @@
         <input type="hidden" name="number_max" value="">
 
         <div class="filters tasks-inline-options">
-          <label><input type="checkbox" name="ai_enabled" value="1"> Execute AI on submitted response</label>
+          <label><input type="checkbox" name="ai_enabled" value="1"> Process Response Through AI</label>
         </div>
 
         <div class="filters tasks-inline-options">
@@ -239,9 +245,7 @@
             <option value="daily">Daily</option>
             <option value="weekly">Weekly</option>
             <option value="monthly">Monthly</option>
-            <option value="interval">Custom Interval</option>
           </select>
-          <input class="input" type="number" name="repeat_interval_days" id="repeatDays" min="1" placeholder="Interval days" style="max-width:180px; display:none;">
         </div>
 
         <button class="btn primary" type="submit">Create Task</button>
@@ -252,14 +256,6 @@
 
   {% if user.role == "user" %}
   <div style="margin-top:16px;">
-    {% if user.role == "user" %}
-    <div class="task-filters tasks-status-filters" style="margin-bottom:12px;">
-      <a class="task-filter-pill {% if status_filter == 'all' %}active{% endif %}" href="/tasks?status=all">All</a>
-      <a class="task-filter-pill {% if status_filter == 'pending' %}active{% endif %}" href="/tasks?status=pending">Pending</a>
-      <a class="task-filter-pill {% if status_filter == 'submitted' %}active{% endif %}" href="/tasks?status=submitted">Submitted</a>
-      <a class="task-filter-pill {% if status_filter == 'overdue' %}active{% endif %}" href="/tasks?status=overdue">Overdue</a>
-    </div>
-    {% endif %}
     <div>
       {% if instances %}
       <div class="task-card-list tasks-card-list">
@@ -300,7 +296,16 @@
                     <input class="input" type="text" value="{{ t.number_max if t.number_max is not none else '-' }}" readonly>
                   </label>
                   {% else %}
-                  <input class="input" type="file" name="response_file" {% if t.question_type != "number" %}required{% endif %}>
+                  <label class="field">
+                    <span>Upload File 1</span>
+                    <input class="input" type="file" name="response_file" {% if t.question_type != "number" %}required{% endif %}>
+                  </label>
+                  {% if (t.image_upload_count or 1)|int >= 2 %}
+                  <label class="field">
+                    <span>Upload File 2</span>
+                    <input class="input" type="file" name="response_file_2" required>
+                  </label>
+                  {% endif %}
                   {% endif %}
                   {% if t.question_type in ["number", "upload_number"] %}
                   <input class="input" type="number" step="any" name="entered_number" placeholder="Enter numeric response{% if t.number_unit %} ({{ t.number_unit }}){% endif %}" {% if t.question_type == "number" %}required{% endif %}>
@@ -515,11 +520,9 @@
 
   const repeatEnabled = document.getElementById("repeatEnabled");
   const repeatType = document.getElementById("repeatType");
-  const repeatDays = document.getElementById("repeatDays");
   function syncRepeat() {
     const on = repeatEnabled && repeatEnabled.checked;
     if (repeatType) repeatType.disabled = !on;
-    if (repeatDays) repeatDays.style.display = (on && repeatType && repeatType.value === "interval") ? "" : "none";
   }
   repeatEnabled?.addEventListener("change", syncRepeat);
   repeatType?.addEventListener("change", syncRepeat);
@@ -530,6 +533,8 @@
   const customTaskTitleInput = document.getElementById("customTaskTitleInput");
   const idealValueLabel = document.getElementById("idealValueLabel");
   const idealValueInput = document.getElementById("idealValueInput");
+  const imageUploadCountField = document.getElementById("imageUploadCountField");
+  const imageUploadCountSelect = document.getElementById("imageUploadCountSelect");
   function syncTaskTitle() {
     const selectedTitle = taskTitleSelect ? taskTitleSelect.value : "";
     const isCustom = selectedTitle === "Custom";
@@ -538,6 +543,8 @@
     if (customTaskTitleInput) customTaskTitleInput.required = !!isCustom;
     if (idealValueLabel) idealValueLabel.textContent = isOdometer ? "Average KMPL" : "Ideal Value (max)";
     if (idealValueInput) idealValueInput.placeholder = isOdometer ? "e.g. 5.5" : "e.g. 2.0 for earthing";
+    if (imageUploadCountField) imageUploadCountField.style.display = isOdometer ? "none" : "";
+    if (imageUploadCountSelect && isOdometer) imageUploadCountSelect.value = "1";
   }
   taskTitleSelect?.addEventListener("change", syncTaskTitle);
   syncTaskTitle();

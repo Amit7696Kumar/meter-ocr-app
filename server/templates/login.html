@@ -113,8 +113,8 @@
 
       <div class="authv2-pane" data-auth-pane="forgot">
         <div class="authv2-pane-head">
-          <h2>Password Help</h2>
-          <p>For security, direct password reset is disabled. Submit your account details and contact an administrator.</p>
+          <h2>Reset Password</h2>
+          <p>Enter your username or email to continue to the password reset step.</p>
         </div>
         <form method="post" action="/forgot-password" class="stack">
           <input type="hidden" name="csrf_token" value="{{ request.session.get('csrf_token', '') }}">
@@ -122,9 +122,7 @@
             <span>Username or Email</span>
             <input class="input" name="identifier" placeholder="Enter username or email" required>
           </label>
-          <input type="hidden" name="new_password" value="disabled">
-          <input type="hidden" name="confirm_password" value="disabled">
-          <button class="btn primary authv2-btn" type="submit">Request Reset Help</button>
+          <button class="btn primary authv2-btn" type="submit">Continue</button>
           <div class="authv2-row">
             <span class="small-muted">Remembered your password?</span>
             <a href="#" class="js-back-signin">Back to sign in</a>

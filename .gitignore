@@ -1,6 +1,8 @@
 # local env secrets
 .env
 .env.*
+.runtime/*
+.venv/*
 
 # macOS noise
 .DS_Store

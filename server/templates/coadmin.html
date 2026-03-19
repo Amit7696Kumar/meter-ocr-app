@@ -12,6 +12,72 @@
 
   {% set page_title = "Coadmin — " ~ team_names.get(team_id, "Team " ~ team_id) %}
   {% include "_partials/head_assets.html" %}
+  <style>
+    .dashboard-status-tabs {
+      display: flex;
+      gap: 10px;
+      overflow-x: auto;
+      padding-bottom: 4px;
+      scrollbar-width: none;
+      margin-bottom: 12px;
+    }
+    .dashboard-status-tabs::-webkit-scrollbar { display: none; }
+    .dashboard-status-tab {
+      border: 1px solid rgba(148, 163, 184, 0.22);
+      background: rgba(255,255,255,0.72);
+      color: #475569;
+      border-radius: 18px 18px 12px 12px;
+      padding: 12px 14px;
+      min-width: 138px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      cursor: pointer;
+      transition: background 180ms ease, color 180ms ease, transform 180ms ease, box-shadow 180ms ease, opacity 180ms ease;
+    }
+    .dashboard-status-tab:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 10px 22px rgba(15, 23, 42, 0.08);
+      color: #0f172a;
+    }
+    .dashboard-status-tab.is-active {
+      background: linear-gradient(135deg, #123b70, #1f5a9c);
+      color: #fff;
+      border-color: transparent;
+      box-shadow: 0 16px 30px rgba(18, 59, 112, 0.26);
+    }
+    .dashboard-status-tab.is-active .dashboard-status-tab-count {
+      background: rgba(255,255,255,0.18);
+      color: #fff;
+    }
+    .dashboard-status-tab-title {
+      font-size: 0.95rem;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+    .dashboard-status-tab-count {
+      min-width: 32px;
+      height: 32px;
+      border-radius: 999px;
+      background: rgba(15, 23, 42, 0.08);
+      color: #0f172a;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 0.84rem;
+      font-weight: 700;
+      padding: 0 10px;
+    }
+    .dashboard-table-animated {
+      transition: opacity 180ms ease, transform 180ms ease;
+      transform-origin: top center;
+    }
+    .dashboard-table-animated.is-switching {
+      opacity: 0.45;
+      transform: translateY(4px);
+    }
+  </style>
 </head>
 
 <body class="app-shell coadmin-dashboard-page">
@@ -83,18 +149,26 @@
           <option value="odometer">Odometer Reading</option>
           <option value="fire_point">Fire Point Check</option>
         </select>
-        <select id="statusFilter">
-          <option value="all">All Status</option>
-          <option value="pending">Pending</option>
-          <option value="submitted">Submitted</option>
-          <option value="completed">Completed</option>
-          <option value="overdue">Overdue</option>
-          <option value="late">Late</option>
-        </select>
+        <input type="hidden" id="statusFilter" value="">
+      </div>
+      <div class="dashboard-status-tabs" id="coadminStatusTabs" role="tablist" aria-label="Dashboard status tabs">
+        <button class="dashboard-status-tab" type="button" data-status-tab="submitted" role="tab" aria-selected="false">
+          <span class="dashboard-status-tab-title">Submitted</span>
+          <span class="dashboard-status-tab-count" data-status-count="submitted">0</span>
+        </button>
+        <button class="dashboard-status-tab" type="button" data-status-tab="pending" role="tab" aria-selected="false">
+          <span class="dashboard-status-tab-title">Pending</span>
+          <span class="dashboard-status-tab-count" data-status-count="pending">0</span>
+        </button>
+        <button class="dashboard-status-tab" type="button" data-status-tab="overdue" role="tab" aria-selected="false">
+          <span class="dashboard-status-tab-title">Overdue</span>
+          <span class="dashboard-status-tab-count" data-status-count="overdue">0</span>
+        </button>
       </div>
 
-      {% if (readings and readings|length > 0) or (task_instances and task_instances|length > 0) %}
-      <div class="table-wrap dashboard-table-wrap">
+      {% set use_combined_rows = dashboard_rows is defined and dashboard_rows and dashboard_rows|length > 0 %}
+      {% if use_combined_rows or (readings and readings|length > 0) or (task_instances and task_instances|length > 0) %}
+      <div class="table-wrap dashboard-table-wrap dashboard-table-animated" id="coadminTableWrap">
       <table class="table mobile-friendly-table" id="readingsTable">
         <thead>
           <tr>
@@ -108,72 +182,208 @@
           </tr>
         </thead>
         <tbody>
-          {% for r in readings %}
-          <tr data-meter="{{ r.meter_type }}" data-user="{{ r.username }}" data-team="{{ r.team or team_id }}" data-label="{{ r.label }}" data-created="{{ r.created_at }}" data-value="{{ r.value or '' }}" data-filename="{{ r.filename or '' }}" data-status="{{ (r.status or '')|lower }}" data-ocrjson="{{ (r.ocr_json or '')|e }}">
-            <td>{{ r.id }}</td>
-            <td>{{ r.created_at }}</td>
-            <td><b>{{ r.label or r.meter_type }}</b></td>
-            <td>{{ r.username }}</td>
+          {% if use_combined_rows %}
+          {% for row in dashboard_rows %}
+          {% if row._row_kind == 'reading' %}
+          <tr data-meter="{{ row.meter_type }}" data-user="{{ row.username }}" data-team="{{ row.team or team_id }}" data-label="{{ row.label }}" data-created="{{ row.created_at }}" data-value="{{ row.value or '' }}" data-filename="{{ row.filename or '' }}" data-status="{{ (row.status or '')|lower }}" data-ocrjson="{{ (row.ocr_json or '')|e }}" data-image-taken="{{ row.image_taken_at or '' }}" data-image-taken2="{{ row.image_taken_at_2 or '' }}">
+            <td>{{ row.id }}</td>
+            <td>{{ row.created_at }}</td>
+            <td><b>{{ row.label or row.meter_type }}</b></td>
+            <td>{{ row.username }}</td>
             <td>
-              {% if r.status %}
-                <span class="pill {{ r.status_class }}">{{ r.status }}</span>
+              {% if row.status %}
+                <span class="pill {{ row.status_class }}">{{ row.status }}</span>
               {% else %}
                 <span class="small-muted">-</span>
               {% endif %}
             </td>
             <td class="num">
-              {% if r.value %}
-                <b>{{ r.value }}</b>
+              {% if row.value %}
+                <b>{{ row.value }}</b>
               {% else %}
                 <span class="small-muted">-</span>
               {% endif %}
             </td>
             <td>
-              {% if r.filename %}
-                <button class="btn small js-open-image" type="button" data-src="/uploads/{{ r.filename }}" {% if r.filename_2 %}data-src2="/uploads/{{ r.filename_2 }}"{% endif %}>Open</button>
+              {% if row.filename %}
+                <button class="btn small js-open-image" type="button" data-src="/uploads/{{ row.filename }}" {% if row.filename_2 %}data-src2="/uploads/{{ row.filename_2 }}"{% endif %}>Open</button>
               {% else %}
                 -
               {% endif %}
             </td>
           </tr>
-          {% endfor %}
-          {% for t in task_instances %}
-          <tr data-meter="task" data-user="{{ t.assigned_username or t.assigned_user_id }}" data-team="{{ t.assigned_team_id or team_id }}" data-label="{{ t.title }}" data-created="{{ t.submitted_at or t.deadline_at }}" data-value="{{ '' if (t.response_value|string|lower) == 'overdue' else (t.response_value or '') }}" data-status="{{ (t.status or '')|lower }}" data-ai-result="{{ (t.ai_result_reference or '')|e }}">
-            <td>{{ t.id }}</td>
-            <td>{{ t.submitted_at or t.deadline_at }}</td>
-            <td><b>{{ t.title }}</b></td>
-            <td>{{ t.assigned_username or t.assigned_user_id }}</td>
+          {% else %}
+          <tr data-meter="task" data-user="{{ row.assigned_username or row.assigned_user_id }}" data-team="{{ row.assigned_team_id or team_id }}" data-label="{{ row.title }}" data-created="{{ row.submitted_at or row.deadline_at }}" data-value="{{ '' if (row.response_value|string|lower) == 'overdue' else (row.response_value or '') }}" data-status="{{ (row.status or '')|lower }}" data-ai-result="{{ (row.ai_result_reference or '')|e }}" data-image-taken="{{ row.response_image_taken_at or '' }}" data-image-taken2="{{ row.response_image_taken_at_2 or '' }}">
+            <td>{{ row.id }}</td>
+            <td>{{ row.submitted_at or row.deadline_at }}</td>
+            <td><b>{{ row.title }}</b></td>
+            <td>{{ row.assigned_username or row.assigned_user_id }}</td>
             <td>
-              <span class="pill {% if t.status == 'overdue' %}high{% elif t.status in ['submitted','late','completed'] %}ok{% else %}low{% endif %}">
-                {{ t.status }}
+              <span class="pill {% if row.status == 'overdue' %}high{% elif row.status in ['submitted','late','completed'] %}ok{% else %}low{% endif %}">
+                {{ row.status }}
               </span>
             </td>
             <td class="num">
-              {% if t.response_value is not none and (t.response_value|string|lower) != 'overdue' %}
-                {{ t.response_value }}
-                {% if t.response_fuel_consumed is not none %}
-                  <div class="small-muted">{{ t.response_fuel_consumed }} L</div>
+              {% if row.response_value is not none and (row.response_value|string|lower) != 'overdue' %}
+                {{ row.response_value }}
+                {% if row.response_fuel_consumed is not none %}
+                  <div class="small-muted">{{ row.response_fuel_consumed }} L</div>
                 {% endif %}
               {% else %}
                 -
               {% endif %}
             </td>
             <td>
-              {% if t.response_file_path and t.response_file_path.startswith('/uploads/') %}
-                <button class="btn small js-open-image" type="button" data-src="{{ t.response_file_path }}" {% if t.response_file_path_2 %}data-src2="{{ t.response_file_path_2 }}"{% endif %}>Open</button>
+              {% if row.response_file_path and row.response_file_path.startswith('/uploads/') %}
+                <button class="btn small js-open-image" type="button" data-src="{{ row.response_file_path }}" {% if row.response_file_path_2 %}data-src2="{{ row.response_file_path_2 }}"{% endif %}>Open</button>
+              {% else %}
+                -
+              {% endif %}
+            </td>
+          </tr>
+          {% endif %}
+          {% endfor %}
+          {% else %}
+          {% for row in readings %}
+          <tr data-meter="{{ row.meter_type }}" data-user="{{ row.username }}" data-team="{{ row.team or team_id }}" data-label="{{ row.label }}" data-created="{{ row.created_at }}" data-value="{{ row.value or '' }}" data-filename="{{ row.filename or '' }}" data-status="{{ (row.status or '')|lower }}" data-ocrjson="{{ (row.ocr_json or '')|e }}" data-image-taken="{{ row.image_taken_at or '' }}" data-image-taken2="{{ row.image_taken_at_2 or '' }}">
+            <td>{{ row.id }}</td>
+            <td>{{ row.created_at }}</td>
+            <td><b>{{ row.label or row.meter_type }}</b></td>
+            <td>{{ row.username }}</td>
+            <td>
+              {% if row.status %}
+                <span class="pill {{ row.status_class }}">{{ row.status }}</span>
+              {% else %}
+                <span class="small-muted">-</span>
+              {% endif %}
+            </td>
+            <td class="num">
+              {% if row.value %}
+                <b>{{ row.value }}</b>
+              {% else %}
+                <span class="small-muted">-</span>
+              {% endif %}
+            </td>
+            <td>
+              {% if row.filename %}
+                <button class="btn small js-open-image" type="button" data-src="/uploads/{{ row.filename }}" {% if row.filename_2 %}data-src2="/uploads/{{ row.filename_2 }}"{% endif %}>Open</button>
               {% else %}
                 -
               {% endif %}
             </td>
           </tr>
           {% endfor %}
+          {% for row in task_instances %}
+          <tr data-meter="task" data-user="{{ row.assigned_username or row.assigned_user_id }}" data-team="{{ row.assigned_team_id or team_id }}" data-label="{{ row.title }}" data-created="{{ row.submitted_at or row.deadline_at }}" data-value="{{ '' if (row.response_value|string|lower) == 'overdue' else (row.response_value or '') }}" data-status="{{ (row.status or '')|lower }}" data-ai-result="{{ (row.ai_result_reference or '')|e }}" data-image-taken="{{ row.response_image_taken_at or '' }}" data-image-taken2="{{ row.response_image_taken_at_2 or '' }}">
+            <td>{{ row.id }}</td>
+            <td>{{ row.submitted_at or row.deadline_at }}</td>
+            <td><b>{{ row.title }}</b></td>
+            <td>{{ row.assigned_username or row.assigned_user_id }}</td>
+            <td>
+              <span class="pill {% if row.status == 'overdue' %}high{% elif row.status in ['submitted','late','completed'] %}ok{% else %}low{% endif %}">
+                {{ row.status }}
+              </span>
+            </td>
+            <td class="num">
+              {% if row.response_value is not none and (row.response_value|string|lower) != 'overdue' %}
+                {{ row.response_value }}
+                {% if row.response_fuel_consumed is not none %}
+                  <div class="small-muted">{{ row.response_fuel_consumed }} L</div>
+                {% endif %}
+              {% else %}
+                -
+              {% endif %}
+            </td>
+            <td>
+              {% if row.response_file_path and row.response_file_path.startswith('/uploads/') %}
+                <button class="btn small js-open-image" type="button" data-src="{{ row.response_file_path }}" {% if row.response_file_path_2 %}data-src2="{{ row.response_file_path_2 }}"{% endif %}>Open</button>
+              {% else %}
+                -
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+          {% endif %}
         </tbody>
       </table>
       </div>
 
       <script>
+        function setupStatusTabs({ tabsId, statusSelectId, animatedIds = [] }) {
+          const tabsWrap = document.getElementById(tabsId);
+          const statusSelect = document.getElementById(statusSelectId);
+          if (!tabsWrap || !statusSelect || typeof setupFiltering !== "function") return;
+          const tabs = Array.from(tabsWrap.querySelectorAll("[data-status-tab]"));
+          const animatedEls = animatedIds.map((id) => document.getElementById(id)).filter(Boolean);
+          const normalizeStatusBucket = (rawStatus) => {
+            const status = String(rawStatus || "").toLowerCase().trim();
+            if (["submitted", "completed", "late"].includes(status)) return "submitted";
+            if (status === "overdue") return "overdue";
+            return "pending";
+          };
+          const allItems = Array.from(document.querySelectorAll("#readingsTable tbody tr"));
+
+          const getCounts = () => {
+            const counts = { submitted: 0, pending: 0, overdue: 0 };
+            allItems.forEach((item) => {
+              const bucket = normalizeStatusBucket(item.dataset.status || "");
+              counts[bucket] += 1;
+            });
+            return counts;
+          };
+
+          const updateCounts = () => {
+            const counts = getCounts();
+            Object.entries(counts).forEach(([key, value]) => {
+              const badge = tabsWrap.querySelector(`[data-status-count="${key}"]`);
+              if (badge) badge.textContent = String(value);
+            });
+          };
+
+          const syncActiveTab = () => {
+            const current = String(statusSelect.value || "pending").toLowerCase();
+            tabs.forEach((tab) => {
+              const active = tab.dataset.statusTab === current;
+              tab.classList.toggle("is-active", active);
+              tab.setAttribute("aria-selected", active ? "true" : "false");
+            });
+          };
+
+          tabs.forEach((tab) => {
+            tab.addEventListener("click", () => {
+              const nextStatus = String(tab.dataset.statusTab || "pending").toLowerCase();
+              animatedEls.forEach((el) => el.classList.add("is-switching"));
+              window.setTimeout(() => {
+                statusSelect.value = nextStatus;
+                statusSelect.dispatchEvent(new Event("change", { bubbles: true }));
+                syncActiveTab();
+                window.setTimeout(() => animatedEls.forEach((el) => el.classList.remove("is-switching")), 160);
+              }, 40);
+            });
+          });
+
+          document.addEventListener("dashboard:filter-changed", (event) => {
+            if (event.detail?.tableId !== "readingsTable") return;
+            syncActiveTab();
+          });
+
+          const counts = getCounts();
+          updateCounts();
+          if (!["submitted", "pending", "overdue"].includes(String(statusSelect.value || "").toLowerCase())) {
+            const firstAvailable = ["submitted", "pending", "overdue"].find((key) => counts[key] > 0) || "pending";
+            statusSelect.value = firstAvailable;
+            statusSelect.dispatchEvent(new Event("change", { bubbles: true }));
+          }
+          syncActiveTab();
+        }
+
         document.addEventListener("DOMContentLoaded", () => {
           setupFiltering("readingsTable", "searchReadings", "meterFilter", "statusFilter");
+          setupStatusTabs({
+            tabsId: "coadminStatusTabs",
+            statusSelectId: "statusFilter",
+            animatedIds: ["coadminTableWrap"],
+          });
         });
       </script>
 
@@ -290,6 +500,8 @@ document.addEventListener("click", (e) => {
   const user = row?.dataset.user || "-";
   const team = row?.dataset.team || "{{ team_id }}";
   const created = row?.dataset.created || "-";
+  const imageTaken = row?.dataset.imageTaken || "";
+  const imageTaken2 = row?.dataset.imageTaken2 || "";
   const status = row?.dataset.status || "-";
   const value = row?.dataset.value || "-";
   let detectorSource = "";
@@ -318,6 +530,8 @@ document.addEventListener("click", (e) => {
     { label: "Value", value },
     { label: "Time", value: created },
   ];
+  if (imageTaken) detailRows.push({ label: src2 ? "Start Image Taken" : "Image Taken", value: imageTaken });
+  if (imageTaken2) detailRows.push({ label: "End Image Taken", value: imageTaken2 });
   info.innerHTML = `
     <div class="image-modal-info-title">Submission Details</div>
     <div class="image-modal-info-list">
@@ -332,19 +546,19 @@ document.addEventListener("click", (e) => {
   if (meta) {
     meta.textContent = detectorSource ? `Detector: ${detectorSource}` : "";
   }
-  let html = `
-    <div class="imgcard">
-      <div class="small-muted" style="margin-bottom:6px;"><b>${src2 ? "Start Image" : "Uploaded Image"}</b></div>
-      <img src="${src}" loading="eager" decoding="async" alt="Uploaded Image" />
-    </div>
-  `;
+  let html = renderUploadImageCard({
+    src,
+    title: src2 ? "Start Image" : "Uploaded Image",
+    alt: "Uploaded Image",
+    eager: true,
+  });
   if (src2) {
-    html += `
-      <div class="imgcard">
-        <div class="small-muted" style="margin-bottom:6px;"><b>End Image</b></div>
-        <img src="${src2}" loading="eager" decoding="async" alt="Uploaded Image 2" />
-      </div>
-    `;
+    html += renderUploadImageCard({
+      src: src2,
+      title: "End Image",
+      alt: "Uploaded Image 2",
+      eager: true,
+    });
   }
   images.innerHTML = html;
   modal.classList.add("open");

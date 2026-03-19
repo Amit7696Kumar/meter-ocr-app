@@ -10,6 +10,7 @@ import threading
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta
+from functools import lru_cache
 from pathlib import Path
 from typing import Optional, Any, Dict, List
 
@@ -26,6 +27,8 @@ from starlette.responses import Response
 import bcrypt as pybcrypt
 import numpy as np
 from passlib.hash import pbkdf2_sha256
+from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
+from PIL import Image
 
 from server.db import (
     init_db,
@@ -86,6 +89,7 @@ from server.db import (
     task_list_instances_for_scope,
     task_mark_instance_status,
     task_get_submission,
+    task_get_question,
     task_upsert_submission,
     task_list_due_for_overdue,
     task_mark_overdue_sent,
@@ -140,6 +144,34 @@ def _load_local_env_files() -> None:
             continue
 
 
+def _normalize_image_taken_at(raw: Any) -> Optional[str]:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    for fmt in ("%Y:%m:%d %H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y:%m:%d %H:%M:%S%z", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            dt = datetime.strptime(text, fmt)
+            return dt.strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            continue
+    return text
+
+
+def _extract_image_taken_at(image_path: str) -> Optional[str]:
+    try:
+        with Image.open(image_path) as img:
+            exif = img.getexif()
+            if not exif:
+                return None
+            for tag_id in (36867, 36868, 306):
+                normalized = _normalize_image_taken_at(exif.get(tag_id))
+                if normalized:
+                    return normalized
+    except Exception:
+        return None
+    return None
+
+
 _load_local_env_files()
 
 setup_logging()
@@ -155,6 +187,49 @@ error_logger = get_logger("errors")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
+TASK_RULES_PATH = os.path.join(BASE_DIR, "task_processing_rules.json")
+
+
+@lru_cache(maxsize=1)
+def _load_task_processing_rules() -> List[Dict[str, Any]]:
+    try:
+        with open(TASK_RULES_PATH, "r", encoding="utf-8") as fh:
+            payload = json.load(fh)
+    except Exception:
+        return []
+    rules = payload.get("rules") if isinstance(payload, dict) else payload
+    if not isinstance(rules, list):
+        return []
+    normalized: List[Dict[str, Any]] = []
+    for idx, raw in enumerate(rules):
+        if isinstance(raw, dict):
+            item = dict(raw)
+            item.setdefault("id", f"rule_{idx + 1}")
+            item.setdefault("priority", idx + 1)
+            normalized.append(item)
+    normalized.sort(key=lambda item: int(item.get("priority") or 0))
+    return normalized
+
+
+def _task_rule_matches(task_text: str, rule: Dict[str, Any]) -> bool:
+    haystack = f" {task_text.lower()} "
+    match_all = [str(token).strip().lower() for token in (rule.get("match_all") or []) if str(token).strip()]
+    match_any = [str(token).strip().lower() for token in (rule.get("match_any") or []) if str(token).strip()]
+    excludes = [str(token).strip().lower() for token in (rule.get("exclude_any") or []) if str(token).strip()]
+    if excludes and any(token in haystack for token in excludes):
+        return False
+    if match_all and not all(token in haystack for token in match_all):
+        return False
+    if match_any and not any(token in haystack for token in match_any):
+        return False
+    return bool(match_all or match_any)
+
+
+def _task_find_processing_rule(task_text: str) -> Optional[Dict[str, Any]]:
+    for rule in _load_task_processing_rules():
+        if _task_rule_matches(task_text, rule):
+            return rule
+    return None
 TEMPLATE_DIR = os.path.join(BASE_DIR, "templates")
 STATIC_DIR = os.path.join(BASE_DIR, "static")
 PREVIEW_DIR = os.path.join(UPLOAD_DIR, "_previews")
@@ -198,6 +273,7 @@ SESSION_SECRET_KEY = (os.getenv("SESSION_SECRET_KEY", "") or "").strip() or "CHA
 SESSION_MAX_AGE = max(300, _env_int("SESSION_MAX_AGE", 60 * 60 * 24 * 7))
 SESSION_COOKIE_HTTPS_ONLY = _env_bool("SESSION_COOKIE_HTTPS_ONLY", default=False)
 SESSION_COOKIE_SAMESITE = _session_cookie_samesite()
+PASSWORD_RESET_TOKEN_TTL_SECONDS = max(300, _env_int("PASSWORD_RESET_TOKEN_TTL_SECONDS", 30 * 60))
 
 # Session cookies
 app.add_middleware(
@@ -247,11 +323,17 @@ def _client_ip(request: Request) -> str:
 
 
 def _issue_csrf_token(request: Request) -> str:
-    token = request.session.get("csrf_token")
+    try:
+        token = request.session.get("csrf_token")
+    except AssertionError:
+        return ""
     if token:
         return str(token)
     token = secrets.token_urlsafe(32)
-    request.session["csrf_token"] = token
+    try:
+        request.session["csrf_token"] = token
+    except AssertionError:
+        return ""
     return token
 
 
@@ -267,7 +349,10 @@ async def _require_csrf(request: Request) -> Optional[Response]:
         return None
     if request.url.path in _CSRF_EXEMPT_PATHS:
         return None
-    session_token = str(request.session.get("csrf_token") or "")
+    try:
+        session_token = str(request.session.get("csrf_token") or "")
+    except AssertionError:
+        return None
     if not session_token:
         _issue_csrf_token(request)
         return JSONResponse({"error": "csrf_missing"}, status_code=403)
@@ -460,6 +545,22 @@ def _generate_cached_preview(source_path: Path) -> Optional[Path]:
     tmp_path.write_bytes(encoded.tobytes())
     os.replace(tmp_path, preview_path)
     return preview_path
+
+
+def _warm_cached_preview(path_like: Optional[str]) -> None:
+    if not path_like:
+        return
+    source_path = Path(path_like)
+    if source_path.suffix.lower() not in {".jpg", ".jpeg", ".png", ".webp"}:
+        return
+
+    def _runner() -> None:
+        try:
+            _generate_cached_preview(source_path)
+        except Exception:
+            return
+
+    threading.Thread(target=_runner, daemon=True).start()
 
 
 @app.middleware("http")
@@ -689,6 +790,7 @@ def _is_effectively_unassigned_user(user: Optional[Dict[str, Any]]) -> bool:
 
 
 def _auth_page(request: Request, error: Optional[str] = None, info: Optional[str] = None):
+    _issue_csrf_token(request)
     google_enabled = bool((os.getenv("GOOGLE_CLIENT_ID", "") or "").strip() and (os.getenv("GOOGLE_CLIENT_SECRET", "") or "").strip())
     return templates.TemplateResponse(
         "login.html",
@@ -708,6 +810,7 @@ def _must_rotate_password(user: Optional[Dict[str, Any]]) -> bool:
 
 
 def _password_change_page(request: Request, user: Dict[str, Any], error: Optional[str] = None, info: Optional[str] = None):
+    _issue_csrf_token(request)
     return templates.TemplateResponse(
         "force_password_change.html",
         {
@@ -717,6 +820,66 @@ def _password_change_page(request: Request, user: Dict[str, Any], error: Optiona
             "info": info or request.query_params.get("info"),
         },
     )
+
+
+def _password_reset_page(request: Request, token: str, error: Optional[str] = None, info: Optional[str] = None):
+    _issue_csrf_token(request)
+    return templates.TemplateResponse(
+        "reset_password.html",
+        {
+            "request": request,
+            "token": token,
+            "error": error or request.query_params.get("error"),
+            "info": info or request.query_params.get("info"),
+        },
+    )
+
+
+def _password_reset_serializer() -> URLSafeTimedSerializer:
+    return URLSafeTimedSerializer(SESSION_SECRET_KEY, salt="password-reset")
+
+
+def _password_reset_stamp(user: Dict[str, Any]) -> str:
+    raw = str(user.get("password_hash") or "")
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def _create_password_reset_token(user: Dict[str, Any]) -> str:
+    payload = {
+        "uid": int(user["id"]),
+        "stamp": _password_reset_stamp(user),
+    }
+    return _password_reset_serializer().dumps(payload)
+
+
+def _validate_password_reset_token(token: str) -> Optional[Dict[str, Any]]:
+    raw = (token or "").strip()
+    if not raw:
+        return None
+    try:
+        data = _password_reset_serializer().loads(raw, max_age=PASSWORD_RESET_TOKEN_TTL_SECONDS)
+    except (BadSignature, SignatureExpired):
+        return None
+    try:
+        user_id = int(data.get("uid"))
+    except Exception:
+        return None
+    user = get_user_by_id(user_id)
+    if not user:
+        return None
+    if data.get("stamp") != _password_reset_stamp(user):
+        return None
+    return user
+
+
+def _find_user_for_password_reset(identifier: str) -> Optional[Dict[str, Any]]:
+    ident = (identifier or "").strip()
+    if not ident:
+        return None
+    user = get_user_by_email(ident)
+    if user:
+        return user
+    return get_user_by_username(ident)
 
 
 def _google_redirect_uri(request: Request) -> str:
@@ -814,10 +977,22 @@ async def _task_process_ai(
     engine = (ai_engine_type or "auto").strip().lower()
     if file_type == "photo":
         try:
-            mode_hint = _task_ai_mode_hint(instance)
+            question = None
+            form_id = instance.get("form_id")
+            try:
+                if form_id is not None:
+                    question = task_get_question(int(form_id))
+            except Exception:
+                question = None
+            spec = _task_build_spec(instance, question)
+            mode_hint = str(spec.get("mode_hint") or _task_ai_mode_hint(instance))
+            meter_hint = "earthing" if spec.get("task_kind") == "earthing" else None
+            allow_local_ocr_fallback = bool(spec.get("allow_local_ocr_fallback"))
             openai_payload = None
             extracted_text = ""
             value = None
+            validation_status = "failed"
+            validation_reason = ""
             engine_used = "openai"
             if openai_available():
                 try:
@@ -827,38 +1002,67 @@ async def _task_process_ai(
                         task_title=str(instance.get("title") or ""),
                         task_description=str(instance.get("description") or ""),
                         local_result={},
+                        task_spec=spec,
                         mode_hint=mode_hint,
                     )
-                    openai_value = openai_payload.get("value")
-                    if openai_value not in {None, ""}:
-                        value = openai_value
+                    validation = _task_validate_ai_result(spec, openai_payload)
+                    validation_status = str(validation.get("status") or "failed")
+                    validation_reason = str(validation.get("reason") or "")
+                    if validation.get("accepted"):
+                        value = validation.get("value")
                     extracted_text = str(openai_payload.get("summary") or "").strip()
                 except Exception as e:
                     openai_payload = {"error": str(e), "engine_used": "openai"}
 
             ocr = {}
             local_confidence = 0.0
-            if value in {None, ""}:
+            openai_relevant = (openai_payload or {}).get("relevant")
+            openai_confidence = float((openai_payload or {}).get("confidence") or 0.0)
+            should_skip_local_fallback = bool(
+                openai_payload
+                and allow_local_ocr_fallback is False
+                and (
+                    openai_relevant is False
+                    or (
+                        value in {None, ""}
+                        and openai_confidence <= 0.35
+                    )
+                )
+            )
+
+            if value in {None, ""} and not should_skip_local_fallback and allow_local_ocr_fallback:
                 debug_id = uuid.uuid4().hex
-                task_text = f"{instance.get('title') or ''} {instance.get('description') or ''}".lower()
-                meter_hint = "earthing" if "earthing" in task_text else None
                 ocr = await run_in_threadpool(run_ocr, upload_full_path, debug_id, meter_hint)
                 engine_used = "local_fallback"
                 if isinstance(ocr, dict):
                     num = (ocr.get("numeric") or {})
                     if isinstance(num, dict):
-                        value = num.get("value")
+                        ocr_validation = _task_validate_ai_result(
+                            spec,
+                            {
+                                "relevant": True,
+                                "readable": bool(num.get("value")),
+                                "value": num.get("value"),
+                                "present": None,
+                                "confidence": num.get("confidence") or 0.0,
+                                "summary": ocr.get("text") or "",
+                                "evidence": ocr.get("text") or "",
+                            },
+                        )
+                        validation_status = str(ocr_validation.get("status") or validation_status)
+                        validation_reason = str(ocr_validation.get("reason") or validation_reason)
+                        if ocr_validation.get("accepted"):
+                            value = ocr_validation.get("value")
                         try:
                             local_confidence = float(num.get("confidence") or 0.0)
                         except Exception:
                             local_confidence = 0.0
                     extracted_text = extracted_text or (ocr.get("text") or "").strip()
-                if value in {None, ""} and extracted_text:
-                    m = re.search(r"-?\d+(?:\.\d+)?", extracted_text)
-                    if m:
-                        value = m.group(0)
 
-            summary = f"AI ({engine_used}) completed; value={value}" if value else f"AI ({engine_used}) completed; no numeric value extracted"
+            if should_skip_local_fallback and value in {None, ""}:
+                engine_used = "openai"
+
+            summary = f"AI ({engine_used}) completed; value={value}" if value else f"AI ({engine_used}) completed; no value extracted"
             return {
                 "status": "completed",
                 "summary": summary,
@@ -867,6 +1071,10 @@ async def _task_process_ai(
                 "engine_used": engine_used,
                 "local_result": ocr,
                 "openai_result": openai_payload,
+                "task_spec": spec,
+                "validation_status": validation_status,
+                "validation_reason": validation_reason,
+                "confidence": max(openai_confidence, local_confidence),
             }
         except Exception as e:
             return {"status": "failed", "summary": f"AI ({engine}) failed: {e}", "engine_used": engine}
@@ -908,7 +1116,233 @@ def _task_ai_mode_hint(instance: Dict[str, Any]) -> str:
     return "auto"
 
 
-def _task_semantic_alert_reason(instance: Dict[str, Any], response_value: Any) -> Optional[str]:
+def _task_parse_json_object(raw: Optional[str]) -> Dict[str, Any]:
+    try:
+        obj = json.loads(raw or "{}")
+        return obj if isinstance(obj, dict) else {}
+    except Exception:
+        return {}
+
+
+def _task_text_blob(instance: Dict[str, Any], question: Optional[Dict[str, Any]] = None) -> str:
+    return " ".join(
+        [
+            str(instance.get("title") or "").strip(),
+            str(instance.get("description") or "").strip(),
+            str(instance.get("extraction_hints") or "").strip(),
+            str((question or {}).get("question_text") or "").strip(),
+            str((question or {}).get("parsing_instructions") or "").strip(),
+        ]
+    ).strip()
+
+
+def _task_build_spec(instance: Dict[str, Any], question: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    title = str(instance.get("title") or "").strip()
+    description = str(instance.get("description") or "").strip()
+    extraction_hints = str(instance.get("extraction_hints") or "").strip()
+    question_text = str((question or {}).get("question_text") or "").strip()
+    parsing_instructions = str((question or {}).get("parsing_instructions") or "").strip()
+    threshold_rules = _task_parse_json_object((question or {}).get("threshold_rules_json") or instance.get("threshold_rules_json"))
+    task_text = _task_text_blob(instance, question).lower()
+    mode_hint = _task_ai_mode_hint(instance)
+    qtype = (instance.get("question_type") or "upload").strip().lower()
+    unit = str((question or {}).get("unit") or instance.get("number_unit") or "").strip() or None
+    min_v = _task_float((question or {}).get("ideal_min"))
+    max_v = _task_float((question or {}).get("ideal_max"))
+    if min_v is None:
+        min_v = _task_float(instance.get("number_min"))
+    if max_v is None:
+        max_v = _task_float(instance.get("number_max"))
+
+    expected_object = title or question_text or "task evidence"
+    task_kind = "custom_query"
+    expected_output_type = "text"
+    allowed_labels: List[str] = []
+    allow_local_ocr_fallback = False
+    requires_ai = False
+    response_rule = _task_find_processing_rule(task_text)
+
+    if response_rule:
+        task_kind = str(response_rule.get("task_kind") or task_kind)
+        mode_hint = str(response_rule.get("mode_hint") or mode_hint)
+        expected_output_type = str(response_rule.get("expected_output_type") or expected_output_type)
+        expected_object = str(response_rule.get("expected_object") or expected_object)
+        allowed_labels = [str(label).strip() for label in (response_rule.get("allowed_labels") or []) if str(label).strip()]
+        allow_local_ocr_fallback = bool(response_rule.get("allow_local_ocr_fallback"))
+        requires_ai = bool(response_rule.get("requires_ai"))
+        unit = str(response_rule.get("unit") or unit or "").strip() or None
+
+    meter_tokens = ["meter", "gauge", "display", "screen", "reading", "temperature", "temp", "voltage", "pressure"]
+    if response_rule:
+        pass
+    elif "odometer" in task_text:
+        task_kind = "odometer"
+        expected_output_type = "number"
+        expected_object = "odometer display"
+        requires_ai = True
+    elif "earthing" in task_text:
+        task_kind = "earthing"
+        expected_output_type = "number"
+        expected_object = "earthing meter display"
+        allow_local_ocr_fallback = True
+        requires_ai = True
+    elif mode_hint == "present_absent":
+        task_kind = "presence_check"
+        expected_output_type = "present_absent"
+        allowed_labels = ["Present", "Absent"]
+        if "fire" in task_text:
+            expected_object = "fire fighting equipment"
+        requires_ai = True
+    elif mode_hint == "correct_incorrect":
+        task_kind = "compliance_check"
+        expected_output_type = "correct_incorrect"
+        allowed_labels = ["Correct", "Incorrect"]
+        requires_ai = True
+    elif qtype in {"number", "upload_number"} or any(token in task_text for token in meter_tokens):
+        task_kind = "numeric_meter" if any(token in task_text for token in ["meter", "gauge", "display", "screen"]) else "numeric_observation"
+        expected_output_type = "number"
+        allow_local_ocr_fallback = task_kind == "numeric_meter"
+        requires_ai = True
+
+    return {
+        "rule_id": str((response_rule or {}).get("id") or ""),
+        "task_kind": task_kind,
+        "mode_hint": mode_hint,
+        "expected_output_type": expected_output_type,
+        "expected_object": expected_object,
+        "allowed_labels": allowed_labels,
+        "unit": unit,
+        "min_value": min_v,
+        "max_value": max_v,
+        "return_null_if_missing": True,
+        "strict_relevance": True,
+        "allow_local_ocr_fallback": allow_local_ocr_fallback,
+        "requires_ai": requires_ai,
+        "inspection_points": list((response_rule or {}).get("inspection_points") or []),
+        "return_label_when": dict((response_rule or {}).get("return_label_when") or {}),
+        "alert_threshold": dict((response_rule or {}).get("alert_threshold") or {}),
+        "alert_on_values": list((response_rule or {}).get("alert_on_values") or []),
+        "alert_message": str((response_rule or {}).get("alert_message") or "").strip() or None,
+        "unsupported_message": str((response_rule or {}).get("unsupported_message") or "").strip() or None,
+        "use_image_timestamp_as_value": bool((response_rule or {}).get("use_image_timestamp_as_value")),
+        "missing_value_message": str((response_rule or {}).get("missing_value_message") or "").strip() or None,
+        "question_text": question_text or None,
+        "extraction_hints": extraction_hints or None,
+        "parsing_instructions": parsing_instructions or None,
+        "threshold_rules": threshold_rules,
+        "custom_query": " ".join([x for x in [title, description, question_text, extraction_hints] if x]).strip() or title or "task",
+    }
+
+
+def _task_validate_ai_result(spec: Dict[str, Any], payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    data = payload if isinstance(payload, dict) else {}
+    relevant = data.get("relevant")
+    readable = data.get("readable")
+    raw_value = data.get("value")
+    present = data.get("present")
+    summary = str(data.get("summary") or "").strip()
+    evidence = str(data.get("evidence") or "").strip()
+    confidence = float(data.get("confidence") or 0.0)
+    expected_type = str(spec.get("expected_output_type") or "text")
+    task_kind = str(spec.get("task_kind") or "custom_query")
+
+    if relevant is False:
+        return {"accepted": False, "status": "irrelevant", "reason": "Image is not relevant to the task"}
+    if readable is False and expected_type == "number":
+        return {"accepted": False, "status": "unreadable", "reason": "Required numeric display is not readable"}
+
+    def _normalize_numeric(value: Any) -> Optional[float]:
+        if value is None or str(value).strip() == "":
+            return None
+        try:
+            return float(str(value).strip())
+        except Exception:
+            m = re.search(r"-?\d+(?:\.\d+)?", str(value))
+            if not m:
+                return None
+            try:
+                return float(m.group(0))
+            except Exception:
+                return None
+
+    if expected_type == "number":
+        num = _normalize_numeric(raw_value)
+        if num is None:
+            return {"accepted": False, "status": "no_numeric_value", "reason": "No numeric value returned"}
+        normalized_value = f"{num:.2f}" if task_kind == "earthing" else str(raw_value).strip() or str(num)
+        return {
+            "accepted": True,
+            "status": "validated",
+            "value": normalized_value,
+            "numeric_value": num,
+            "reason": "",
+            "confidence": confidence,
+        }
+
+    if expected_type == "present_absent":
+        normalized = None
+        if present is not None:
+            normalized = "Present" if bool(present) else "Absent"
+        else:
+            value_text = str(raw_value or "").strip().lower()
+            if value_text in {"present", "yes", "detected", "available"}:
+                normalized = "Present"
+            elif value_text in {"absent", "no", "not present", "missing"}:
+                normalized = "Absent"
+        if not normalized:
+            return {"accepted": False, "status": "invalid_label", "reason": "Expected Present or Absent"}
+        return {"accepted": True, "status": "validated", "value": normalized, "reason": "", "confidence": confidence}
+
+    if expected_type == "correct_incorrect":
+        value_text = str(raw_value or "").strip().lower()
+        if value_text in {"correct", "proper", "ok", "compliant"}:
+            normalized = "Correct"
+        elif value_text in {"incorrect", "wrong", "improper", "non-compliant", "non compliant"}:
+            normalized = "Incorrect"
+        else:
+            return {"accepted": False, "status": "invalid_label", "reason": "Expected Correct or Incorrect"}
+        return {"accepted": True, "status": "validated", "value": normalized, "reason": "", "confidence": confidence}
+
+    if expected_type == "label":
+        value_text = str(raw_value or summary or evidence).strip()
+        allowed_labels = [str(label).strip() for label in (spec.get("allowed_labels") or []) if str(label).strip()]
+        if not value_text:
+            return {"accepted": False, "status": "no_label_value", "reason": "No label returned"}
+        if not allowed_labels:
+            return {"accepted": True, "status": "validated", "value": value_text, "reason": "", "confidence": confidence}
+        normalized_lookup = {label.lower(): label for label in allowed_labels}
+        canonical = normalized_lookup.get(value_text.lower())
+        if canonical:
+            return {"accepted": True, "status": "validated", "value": canonical, "reason": "", "confidence": confidence}
+        keyword_map = {
+            "Area maintained": ["maintained", "clean", "organized", "proper layout"],
+            "Area Not maintained": ["not maintained", "over hanging", "overhanging", "dirty", "messed", "cluttered", "improper"],
+            "Serviceable": ["serviceable", "working", "spray coming", "functional"],
+            "Unserviceable": ["unserviceable", "not working", "no spray", "faulty"],
+            "ON": ["on", "flame visible", "flame present", "lit"],
+            "OFF": ["off", "no flame", "flame not visible", "not lit"],
+        }
+        lower_value = value_text.lower()
+        for label in allowed_labels:
+            for token in keyword_map.get(label, []):
+                if token in lower_value:
+                    return {"accepted": True, "status": "validated", "value": label, "reason": "", "confidence": confidence}
+        return {"accepted": False, "status": "invalid_label", "reason": f"Expected one of: {', '.join(allowed_labels)}"}
+
+    text_value = str(raw_value or summary or evidence).strip()
+    if not text_value:
+        return {"accepted": False, "status": "no_text_value", "reason": "No task result returned"}
+    if confidence < 0.15 and relevant is not True:
+        return {"accepted": False, "status": "low_confidence", "reason": "Low-confidence text result"}
+    return {"accepted": True, "status": "validated", "value": text_value, "reason": "", "confidence": confidence}
+
+
+def _task_semantic_alert_reason(
+    instance: Dict[str, Any],
+    response_value: Any,
+    spec: Optional[Dict[str, Any]] = None,
+    ai_payload: Optional[Dict[str, Any]] = None,
+) -> Optional[str]:
     if response_value is None:
         return None
     value = str(response_value).strip().lower()
@@ -916,6 +1350,30 @@ def _task_semantic_alert_reason(instance: Dict[str, Any], response_value: Any) -
         return None
     mode_hint = _task_ai_mode_hint(instance)
     title = str(instance.get("title") or "").strip() or "task"
+    evidence = str(((ai_payload or {}).get("openai_result") or {}).get("evidence") or (ai_payload or {}).get("evidence") or (ai_payload or {}).get("summary") or "").strip()
+    active_spec = spec or {}
+    alert_values = {str(item).strip().lower() for item in (active_spec.get("alert_on_values") or []) if str(item).strip()}
+    if alert_values and value in alert_values:
+        template = str(active_spec.get("alert_message") or "").strip()
+        if template:
+            return template.format(title=title, value=response_value, evidence=evidence or str(response_value))
+        return f"Task alert: Rule triggered for task '{title}'."
+    threshold = active_spec.get("alert_threshold") or {}
+    operator = str(threshold.get("operator") or "").strip().lower()
+    threshold_value = _task_float(threshold.get("value"))
+    numeric_value = _task_float(response_value)
+    if operator and threshold_value is not None and numeric_value is not None:
+        triggered = (
+            (operator == "gt" and numeric_value > threshold_value)
+            or (operator == "gte" and numeric_value >= threshold_value)
+            or (operator == "lt" and numeric_value < threshold_value)
+            or (operator == "lte" and numeric_value <= threshold_value)
+        )
+        if triggered:
+            template = str(threshold.get("message") or "").strip()
+            if template:
+                return template.format(title=title, value=numeric_value, threshold=threshold_value, evidence=evidence)
+            return f"Task alert: Value {numeric_value} triggered threshold for task '{title}'."
     if mode_hint == "correct_incorrect" and value == "incorrect":
         return f"Task alert: Response marked Incorrect for task '{title}'."
     if mode_hint == "present_absent" and value == "absent":
@@ -1390,8 +1848,6 @@ async def do_register(
 async def forgot_password(
     request: Request,
     identifier: str = Form(...),
-    new_password: str = Form(...),
-    confirm_password: str = Form(...),
 ):
     ident = (identifier or "").strip()
     retry_after = _auth_rate_limit(request, "forgot_password", ident, limit=4, window_seconds=1800)
@@ -1400,18 +1856,77 @@ async def forgot_password(
         resp.status_code = 429
         resp.headers["Retry-After"] = str(retry_after)
         return resp
+    user = _find_user_for_password_reset(ident)
+    if not user:
+        log_event(
+            security_logger,
+            "WARNING",
+            "SECURITY_FORGOT_PASSWORD_UNKNOWN_ACCOUNT",
+            "Password reset requested for unknown account",
+            identifier=ident or None,
+            ip=_client_ip(request),
+        )
+        return _auth_page(request, error="Account not found for password reset.")
+    token = _create_password_reset_token(user)
     log_event(
-        security_logger,
-        "WARNING",
-        "SECURITY_FORGOT_PASSWORD_BLOCKED",
-        "Unauthenticated password reset request blocked",
-        identifier=ident or None,
+        auth_logger,
+        "INFO",
+        "AUTH_PASSWORD_RESET_STARTED",
+        "Password reset flow started",
+        user_id=int(user["id"]),
         ip=_client_ip(request),
     )
-    return RedirectResponse(
-        "/login?info=Password reset is disabled for security. Contact an administrator to reset your account.",
-        status_code=303,
-    )
+    return RedirectResponse(f"/reset-password?token={urllib.parse.quote(token)}", status_code=303)
+
+
+@app.get("/reset-password", response_class=HTMLResponse)
+def reset_password_page(request: Request, token: str = ""):
+    user = _validate_password_reset_token(token)
+    if not user:
+        return RedirectResponse("/login?error=Password reset link is invalid or expired.", status_code=303)
+    return _password_reset_page(request, token)
+
+
+@app.post("/reset-password")
+async def reset_password_submit(
+    request: Request,
+    token: str = Form(...),
+    new_password: str = Form(...),
+    confirm_password: str = Form(...),
+):
+    user = _validate_password_reset_token(token)
+    if not user:
+        return RedirectResponse("/login?error=Password reset link is invalid or expired.", status_code=303)
+    retry_after = _auth_rate_limit(request, "reset_password_submit", str(user.get("id") or "0"), limit=5, window_seconds=1800)
+    if retry_after is not None:
+        resp = _password_reset_page(request, token, error="Too many reset attempts. Please wait before trying again.")
+        resp.status_code = 429
+        resp.headers["Retry-After"] = str(retry_after)
+        return resp
+    if len(new_password or "") < 6:
+        return _password_reset_page(request, token, error="Password must be at least 6 characters.")
+    if new_password != confirm_password:
+        return _password_reset_page(request, token, error="Password and confirm password do not match.")
+    try:
+        update_user_password(int(user["id"]), hash_password(new_password), force_password_change=False)
+        log_event(
+            auth_logger,
+            "INFO",
+            "AUTH_PASSWORD_RESET",
+            "Password reset completed",
+            user_id=int(user["id"]),
+        )
+        return RedirectResponse("/login?info=Password reset successful. Please sign in with your new password.", status_code=303)
+    except Exception:
+        log_event(
+            auth_logger,
+            "ERROR",
+            "AUTH_PASSWORD_RESET_FAIL",
+            "Password reset failed",
+            exc_info=True,
+            user_id=int(user["id"]),
+        )
+        return _password_reset_page(request, token, error="Unable to reset password right now.")
 
 
 @app.get("/force-password-change", response_class=HTMLResponse)
@@ -1750,6 +2265,9 @@ async def upload_meter_image(
         )
     with open(filepath, "wb") as f:
         f.write(raw_image)
+    _warm_cached_preview(filepath)
+    image_taken_at = _extract_image_taken_at(filepath)
+    image_taken_at_2 = None
     if filepath_2 and image2 is not None:
         raw_image_2 = await image2.read()
         validation_error_2 = _validate_upload_payload(raw_image_2, "photo", ext2)
@@ -1766,6 +2284,8 @@ async def upload_meter_image(
             )
         with open(filepath_2, "wb") as f:
             f.write(raw_image_2)
+        _warm_cached_preview(filepath_2)
+        image_taken_at_2 = _extract_image_taken_at(filepath_2)
 
     ocr_result: Dict[str, Any] = {}
     numeric_value: Optional[str] = None
@@ -1921,6 +2441,8 @@ async def upload_meter_image(
         distance_diff=distance_diff,
         fuel_economy=fuel_economy if meter_type == "odometer" else None,
         fuel_consumed=fuel_consumed,
+        image_taken_at=image_taken_at,
+        image_taken_at_2=image_taken_at_2,
     )
 
     # Alerts logic
@@ -2008,31 +2530,64 @@ def success_page(request: Request):
 # -----------------------
 # Tasks
 # -----------------------
+def _task_has_submission(item: Dict[str, Any]) -> bool:
+    if str(item.get("status") or "").strip().lower() in {"submitted", "late", "completed"}:
+        return True
+    for key in ("response_value", "response_file_path", "response_file_path_2", "submitted_at"):
+        value = item.get(key)
+        if value is None:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        return True
+    return False
+
+
+def _task_status_bucket(item: Dict[str, Any], now: Optional[datetime] = None) -> str:
+    status = str(item.get("status") or "").strip().lower()
+    if status in {"submitted", "late", "completed"} or _task_has_submission(item):
+        return "submitted"
+    if status == "overdue":
+        return "overdue"
+    deadline_at = str(item.get("deadline_at") or "").strip()
+    if deadline_at:
+        try:
+            deadline = datetime.fromisoformat(deadline_at)
+            if (now or datetime.now()) > deadline:
+                return "overdue"
+        except Exception:
+            pass
+    return "pending"
+
+
 @app.get("/tasks", response_class=HTMLResponse)
-def tasks_page(request: Request, status: str = "all", err: Optional[str] = None):
+def tasks_page(request: Request, status: str = "pending", err: Optional[str] = None):
     u = current_user(request)
     if not require_role(u, ["user", "coadmin", "admin"]):
         return RedirectResponse("/login", status_code=303)
 
     if u["role"] == "user":
-        items = task_list_instances_for_user(user_id=int(u["id"]), status=status)
+        all_items = task_list_instances_for_user(user_id=int(u["id"]), status=None)
         forms = []
         assignable_users = []
     else:
         team = _user_team_int(u)
-        items = task_list_instances_for_scope(role=u["role"], team=team)
-        if status != "all":
-            items = [x for x in items if x.get("status") == status]
+        all_items = task_list_instances_for_scope(role=u["role"], team=team)
         forms = task_list_forms_for_actor(role=u["role"], team=team, user_id=int(u["id"]))
         assignable_users = fetch_users_all() if u["role"] == "admin" else fetch_users_by_team(int(team or 0))
         assignable_users = [x for x in assignable_users if x.get("role") == "user"]
 
-    now_iso = datetime.now().isoformat()
+    now = datetime.now()
+    status_filter = status if status in {"submitted", "pending", "overdue"} else "pending"
+    for item in all_items:
+        item["status_bucket"] = _task_status_bucket(item, now)
+    items = [x for x in all_items if x.get("status_bucket") == status_filter]
+    now_iso = now.isoformat()
     summary = {
-        "pending": len([x for x in items if x.get("status") == "pending"]),
-        "submitted": len([x for x in items if x.get("status") in {"submitted", "late", "completed"}]),
-        "overdue": len([x for x in items if x.get("status") == "overdue"]),
-        "total": len(items),
+        "pending": len([x for x in all_items if x.get("status_bucket") == "pending"]),
+        "submitted": len([x for x in all_items if x.get("status_bucket") == "submitted"]),
+        "overdue": len([x for x in all_items if x.get("status_bucket") == "overdue"]),
+        "total": len(all_items),
         "now_iso": now_iso,
     }
     return templates.TemplateResponse(
@@ -2043,7 +2598,7 @@ def tasks_page(request: Request, status: str = "all", err: Optional[str] = None)
             "instances": items,
             "forms": forms,
             "assignable_users": assignable_users,
-            "status_filter": status,
+            "status_filter": status_filter,
             "summary": summary,
             "error": err,
         },
@@ -2067,6 +2622,7 @@ async def tasks_create(
     number_min: Optional[str] = Form(None),
     number_max: Optional[str] = Form(None),
     number_unit: Optional[str] = Form(None),
+    image_upload_count: Optional[str] = Form(None),
     ai_enabled: Optional[str] = Form(None),
     repeat_enabled: Optional[str] = Form(None),
     repeat_type: Optional[str] = Form(None),
@@ -2099,6 +2655,13 @@ async def tasks_create(
         allowed = ["photo"]
     if qtype == "number":
         allowed = []
+    try:
+        requested_image_upload_count = int((image_upload_count or "1").strip())
+    except Exception:
+        requested_image_upload_count = 1
+    requested_image_upload_count = 2 if requested_image_upload_count == 2 else 1
+    if (title or "").strip().lower() == "odometer reading":
+        requested_image_upload_count = 1
 
     qmin: Optional[float] = None
     qmax: Optional[float] = None
@@ -2178,6 +2741,7 @@ async def tasks_create(
         number_min=qmin,
         number_max=qmax,
         number_unit=number_unit,
+        image_upload_count=requested_image_upload_count,
         priority="medium",
         status="active",
     )
@@ -2218,6 +2782,7 @@ async def tasks_submit(
     remarks: Optional[str] = Form(None),
     entered_number: Optional[str] = Form(None),
     response_file: Optional[UploadFile] = File(None),
+    response_file_2: Optional[UploadFile] = File(None),
     response_file_start: Optional[UploadFile] = File(None),
     response_file_end: Optional[UploadFile] = File(None),
 ):
@@ -2258,6 +2823,8 @@ async def tasks_submit(
 
     relative_url: Optional[str] = None
     relative_url_2: Optional[str] = None
+    image_taken_at: Optional[str] = None
+    image_taken_at_2: Optional[str] = None
     detected_type: Optional[str] = None
     full_path: Optional[str] = None
     full_path_2: Optional[str] = None
@@ -2266,9 +2833,24 @@ async def tasks_submit(
     distance_diff_val: Optional[float] = None
     fuel_consumed_val: Optional[float] = None
     task_text = f"{item.get('title') or ''} {item.get('description') or ''}".lower()
-    is_odometer_task = "odometer" in task_text
-    is_earthing_task = "earthing" in task_text
-    is_fire_point_task = any(token in task_text for token in ["fire point", "firepoint", "fire_point", "fire safety", "firefighting"])
+    question = None
+    try:
+        if item.get("form_id") is not None:
+            question = task_get_question(int(item.get("form_id")))
+    except Exception:
+        question = None
+    task_spec = _task_build_spec(item, question)
+    task_kind = str(task_spec.get("task_kind") or "")
+    image_upload_count = 1
+    try:
+        image_upload_count = 2 if int(item.get("image_upload_count") or 1) == 2 else 1
+    except Exception:
+        image_upload_count = 1
+    is_odometer_task = task_kind == "odometer"
+    is_earthing_task = task_kind == "earthing"
+    is_fire_point_task = task_kind == "fire_point"
+    is_timestamp_task = task_kind == "timestamp_value"
+    is_unsupported_task = task_kind == "unsupported_notice"
     fire_point_present: Optional[bool] = None
     fire_point_value: Optional[str] = None
 
@@ -2309,25 +2891,47 @@ async def tasks_submit(
             f.write(raw1)
         with open(full_path_2, "wb") as f:
             f.write(raw2)
+        _warm_cached_preview(full_path)
+        _warm_cached_preview(full_path_2)
+        image_taken_at = _extract_image_taken_at(full_path)
+        image_taken_at_2 = _extract_image_taken_at(full_path_2)
         relative_url = f"/uploads/tasks/{now.strftime('%Y')}/{now.strftime('%m')}/{filename1}"
         relative_url_2 = f"/uploads/tasks/{now.strftime('%Y')}/{now.strftime('%m')}/{filename2}"
     elif qtype in {"upload", "upload_number"}:
         if not response_file or not response_file.filename:
             return RedirectResponse("/tasks?err=file_required", status_code=303)
+        if image_upload_count == 2 and (not response_file_2 or not response_file_2.filename):
+            return RedirectResponse("/tasks?err=second_file_required", status_code=303)
         detected_type = _task_detect_file_type(response_file.filename)
         if not detected_type or detected_type not in allowed_types:
             return RedirectResponse("/tasks?err=invalid_file_type", status_code=303)
         ext = os.path.splitext(response_file.filename.lower())[1]
         if ext not in _task_allowed_ext(detected_type):
             return RedirectResponse("/tasks?err=invalid_file_ext", status_code=303)
+        detected_type_2 = None
+        ext_2 = ""
+        if image_upload_count == 2 and response_file_2 and response_file_2.filename:
+            detected_type_2 = _task_detect_file_type(response_file_2.filename)
+            if not detected_type_2 or detected_type_2 != detected_type or detected_type_2 not in allowed_types:
+                return RedirectResponse("/tasks?err=invalid_second_file_type", status_code=303)
+            ext_2 = os.path.splitext(response_file_2.filename.lower())[1]
+            if ext_2 not in _task_allowed_ext(detected_type_2):
+                return RedirectResponse("/tasks?err=invalid_second_file_ext", status_code=303)
         max_mb = int((os.getenv("TASK_MAX_FILE_MB", "30") or "30").strip() or 30)
         raw = await response_file.read()
-        file_size = len(raw)
-        if file_size > (max_mb * 1024 * 1024):
+        raw_2 = b""
+        if image_upload_count == 2 and response_file_2:
+            raw_2 = await response_file_2.read()
+        file_size = len(raw) + len(raw_2)
+        if file_size > (max_mb * 1024 * 1024 * image_upload_count):
             return RedirectResponse("/tasks?err=file_too_large", status_code=303)
         payload_error = _validate_upload_payload(raw, detected_type, ext)
         if payload_error:
             return _upload_error_redirect("/tasks", payload_error)
+        if image_upload_count == 2 and raw_2:
+            payload_error = _validate_upload_payload(raw_2, detected_type_2 or detected_type, ext_2)
+            if payload_error:
+                return _upload_error_redirect("/tasks", payload_error)
         now = datetime.now()
         subdir = os.path.join(UPLOAD_DIR, "tasks", now.strftime("%Y"), now.strftime("%m"))
         os.makedirs(subdir, exist_ok=True)
@@ -2335,7 +2939,17 @@ async def tasks_submit(
         full_path = os.path.join(subdir, filename)
         with open(full_path, "wb") as f:
             f.write(raw)
+        _warm_cached_preview(full_path)
+        image_taken_at = _extract_image_taken_at(full_path)
         relative_url = f"/uploads/tasks/{now.strftime('%Y')}/{now.strftime('%m')}/{filename}"
+        if image_upload_count == 2 and raw_2:
+            filename_2 = f"task_{instance_id}_2_{uuid.uuid4().hex}{ext_2}"
+            full_path_2 = os.path.join(subdir, filename_2)
+            with open(full_path_2, "wb") as f:
+                f.write(raw_2)
+            _warm_cached_preview(full_path_2)
+            image_taken_at_2 = _extract_image_taken_at(full_path_2)
+            relative_url_2 = f"/uploads/tasks/{now.strftime('%Y')}/{now.strftime('%m')}/{filename_2}"
     else:
         # Keep DB compatibility where file_type may be constrained to pdf/photo/video.
         detected_type = "pdf"
@@ -2349,9 +2963,32 @@ async def tasks_submit(
     should_run_ai = bool(
         full_path
         and detected_type in {"photo", "video"}
-        and (ai_requested or is_earthing_task or is_odometer_task)
-        and (not is_fire_point_task)
+        and ai_requested
+        and not is_timestamp_task
+        and not is_unsupported_task
+        and not is_fire_point_task
+        and not is_odometer_task
     )
+    if is_timestamp_task:
+        number_value = image_taken_at or task_spec.get("missing_value_message")
+        ai_status = "completed"
+        ai_result = f"Timestamp value used: {number_value}" if number_value else "Timestamp metadata not found"
+        ai_payload = {
+            "engine_used": "metadata",
+            "validation_status": "validated" if image_taken_at else "no_value",
+            "validation_reason": "" if image_taken_at else "No timestamp metadata found",
+            "extracted_values": {"value": number_value} if number_value else {},
+        }
+    elif is_unsupported_task:
+        number_value = task_spec.get("unsupported_message") or "This is not supported yet kindly see the image"
+        ai_status = "completed"
+        ai_result = str(number_value)
+        ai_payload = {
+            "engine_used": "rule_config",
+            "validation_status": "validated",
+            "validation_reason": "",
+            "extracted_values": {"value": number_value},
+        }
     if is_odometer_task and full_path and full_path_2:
         ai_status = "completed"
         try:
@@ -2400,15 +3037,24 @@ async def tasks_submit(
                     "distance": distance_diff_val,
                     "fuel_consumed": fuel_consumed_val,
                 },
+                "validation_status": "validated",
+                "validation_reason": "",
             }
             ai_result = (
                 f"Odometer processed: start={start_val:.2f}, end={end_val:.2f}, "
                 f"distance={distance_diff_val:.2f} km, avg_kmpl={avg_kmpl_val:.2f}, "
                 f"fuel_consumed={fuel_consumed_val:.2f} L"
             )
+            number_value = f"Diff {distance_diff_val:.2f}, Fuel {fuel_consumed_val:.2f} L"
         except Exception as e:
             ai_status = "failed"
             ai_result = f"Odometer processing failed: {e}"
+            number_value = None
+            ai_payload = {
+                "engine_used": "openai_then_local",
+                "validation_status": "failed",
+                "validation_reason": str(e),
+            }
     elif is_fire_point_task and full_path:
         try:
             fire_detection = None
@@ -2420,6 +3066,7 @@ async def tasks_submit(
                         task_title=str(item.get("title") or ""),
                         task_description=str(item.get("description") or ""),
                         local_result={},
+                        task_spec=task_spec,
                         mode_hint="present_absent",
                     )
                     if openai_fire.get("present") is not None:
@@ -2466,7 +3113,7 @@ async def tasks_submit(
     if number_value is None and extracted_value is not None:
         number_value = extracted_value
 
-    semantic_alert_reason = _task_semantic_alert_reason(item, number_value)
+    semantic_alert_reason = _task_semantic_alert_reason(item, number_value, task_spec, ai_payload)
 
     task_upsert_submission(
         task_instance_id=int(instance_id),
@@ -2480,6 +3127,8 @@ async def tasks_submit(
         avg_kmpl=avg_kmpl_val,
         distance_diff=distance_diff_val,
         fuel_consumed=fuel_consumed_val,
+        image_taken_at=image_taken_at,
+        image_taken_at_2=image_taken_at_2,
         ai_requested=should_run_ai,
         ai_status=ai_status,
         ai_result_reference=ai_result,
@@ -2492,9 +3141,13 @@ async def tasks_submit(
             extracted_text=str((ai_payload or {}).get("extracted_text") or ai_result or ""),
             extracted_values=(ai_payload or {}).get("extracted_values") or ({"value": number_value} if number_value is not None else {}),
             analysis_summary=ai_result,
-            validation_status="completed" if ai_status == "completed" else ai_status,
+            validation_status=str((ai_payload or {}).get("validation_status") or ("completed" if ai_status == "completed" else ai_status)),
             alert_triggered=bool((is_fire_point_task and fire_point_present is False) or semantic_alert_reason),
-            alert_reason=(f"Fire fighting equipment absent for task '{item.get('title')}'." if is_fire_point_task and fire_point_present is False else semantic_alert_reason),
+            alert_reason=(
+                f"Fire fighting equipment absent for task '{item.get('title')}'."
+                if is_fire_point_task and fire_point_present is False
+                else str((ai_payload or {}).get("validation_reason") or semantic_alert_reason or "")
+            ),
         )
     except Exception:
         pass
@@ -2504,31 +3157,6 @@ async def tasks_submit(
         deadline = now
     status = "late" if now > deadline else "submitted"
     task_mark_instance_status(instance_id=int(instance_id), status=status, submitted_at=now.isoformat())
-
-    if is_earthing_task and number_value is not None:
-        try:
-            ideal_max = item.get("number_max")
-            if ideal_max is not None and float(number_value) > float(ideal_max):
-                _task_send_submission_alert(
-                    item,
-                    (
-                        f"Task alert: Earthing value {number_value} exceeded ideal value {ideal_max} "
-                        f"for task '{item.get('title')}'."
-                    ),
-                    severity="high",
-                )
-        except Exception:
-            pass
-
-    if is_fire_point_task and fire_point_present is False:
-        try:
-            _task_send_submission_alert(
-                item,
-                f"Task alert: Fire fighting equipment absent for task '{item.get('title')}'.",
-                severity="high",
-            )
-        except Exception:
-            pass
 
     if semantic_alert_reason:
         try:

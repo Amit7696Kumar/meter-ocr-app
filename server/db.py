@@ -177,6 +177,10 @@ def init_db():
         cur.execute("ALTER TABLE readings ADD COLUMN fuel_economy TEXT")
     if "fuel_consumed" not in cols:
         cur.execute("ALTER TABLE readings ADD COLUMN fuel_consumed TEXT")
+    if "image_taken_at" not in cols:
+        cur.execute("ALTER TABLE readings ADD COLUMN image_taken_at TEXT")
+    if "image_taken_at_2" not in cols:
+        cur.execute("ALTER TABLE readings ADD COLUMN image_taken_at_2 TEXT")
 
     # Alerts for coadmin/admin
     cur.execute("""
@@ -338,6 +342,7 @@ def init_db():
         repeat_type TEXT,
         repeat_interval_days INTEGER,
         allow_resubmission INTEGER NOT NULL DEFAULT 0,
+        image_upload_count INTEGER NOT NULL DEFAULT 1,
         priority TEXT NOT NULL DEFAULT 'medium',
         status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('draft', 'active', 'expired', 'completed', 'overdue')),
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -445,6 +450,10 @@ def init_db():
         cur.execute("ALTER TABLE task_submissions ADD COLUMN distance_diff REAL")
     if "fuel_consumed" not in sub_cols:
         cur.execute("ALTER TABLE task_submissions ADD COLUMN fuel_consumed REAL")
+    if "image_taken_at" not in sub_cols:
+        cur.execute("ALTER TABLE task_submissions ADD COLUMN image_taken_at TEXT")
+    if "image_taken_at_2" not in sub_cols:
+        cur.execute("ALTER TABLE task_submissions ADD COLUMN image_taken_at_2 TEXT")
     # Ensure upsert target exists for ON CONFLICT(task_instance_id)
     cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_task_submissions_instance_unique ON task_submissions(task_instance_id)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_task_submissions_user ON task_submissions(user_id, submitted_at DESC)")
@@ -520,6 +529,8 @@ def init_db():
         cur.execute("ALTER TABLE task_forms ADD COLUMN extraction_hints TEXT")
     if "threshold_rules_json" not in form_cols:
         cur.execute("ALTER TABLE task_forms ADD COLUMN threshold_rules_json TEXT")
+    if "image_upload_count" not in form_cols:
+        cur.execute("ALTER TABLE task_forms ADD COLUMN image_upload_count INTEGER NOT NULL DEFAULT 1")
 
     # AI result storage
     cur.execute("""
@@ -740,6 +751,8 @@ def insert_reading(
     distance_diff: Optional[str] = None,
     fuel_economy: Optional[str] = None,
     fuel_consumed: Optional[str] = None,
+    image_taken_at: Optional[str] = None,
+    image_taken_at_2: Optional[str] = None,
 ) -> int:
     conn = _conn()
     cur = conn.cursor()
@@ -747,9 +760,9 @@ def insert_reading(
         """
         INSERT INTO readings(
             user_id, team, meter_type, label, value, manual_value, filename, filename_2, ocr_json,
-            odometer_start, odometer_end, distance_diff, fuel_economy, fuel_consumed
+            odometer_start, odometer_end, distance_diff, fuel_economy, fuel_consumed, image_taken_at, image_taken_at_2
         )
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """,
         (
             user_id,
@@ -766,12 +779,63 @@ def insert_reading(
             distance_diff,
             fuel_economy,
             fuel_consumed,
+            image_taken_at,
+            image_taken_at_2,
         ),
     )
     rid = cur.lastrowid
     conn.commit()
     conn.close()
     return int(rid)
+
+
+def update_reading_analysis(
+    *,
+    reading_id: int,
+    value: Optional[str],
+    ocr_json: str,
+    filename_2: Optional[str] = None,
+    odometer_start: Optional[str] = None,
+    odometer_end: Optional[str] = None,
+    distance_diff: Optional[str] = None,
+    fuel_economy: Optional[str] = None,
+    fuel_consumed: Optional[str] = None,
+    image_taken_at: Optional[str] = None,
+    image_taken_at_2: Optional[str] = None,
+):
+    conn = _conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        UPDATE readings
+        SET value=?,
+            ocr_json=?,
+            filename_2=?,
+            odometer_start=?,
+            odometer_end=?,
+            distance_diff=?,
+            fuel_economy=?,
+            fuel_consumed=?,
+            image_taken_at=?,
+            image_taken_at_2=?
+        WHERE id=?
+        """,
+        (
+            value,
+            ocr_json,
+            filename_2,
+            odometer_start,
+            odometer_end,
+            distance_diff,
+            fuel_economy,
+            fuel_consumed,
+            image_taken_at,
+            image_taken_at_2,
+            reading_id,
+        ),
+    )
+    conn.commit()
+    conn.close()
 
 
 def fetch_readings_all() -> List[Dict[str, Any]]:
@@ -1537,6 +1601,7 @@ def task_create_form(
     ai_engine_type: str = "auto",
     extraction_hints: Optional[str] = None,
     threshold_rules_json: Optional[str] = None,
+    image_upload_count: int = 1,
     priority: str = "medium",
     status: str = "active",
 ) -> int:
@@ -1549,9 +1614,9 @@ def task_create_form(
             assigned_user_ids_json, assigned_team_id, deadline_at, allowed_types_json,
             ai_enabled, repeat_enabled, repeat_type, repeat_interval_days, allow_resubmission,
             question_type, number_min, number_max, number_unit, is_required,
-            ai_engine_type, extraction_hints, threshold_rules_json, priority, status
+            ai_engine_type, extraction_hints, threshold_rules_json, image_upload_count, priority, status
         )
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """,
         (
             title.strip(),
@@ -1576,6 +1641,7 @@ def task_create_form(
             (ai_engine_type or "auto").strip() or "auto",
             (extraction_hints or "").strip() or None,
             (threshold_rules_json or "").strip() or None,
+            max(1, min(2, int(image_upload_count or 1))),
             priority,
             status,
         ),
@@ -1668,7 +1734,7 @@ def task_get_instance(instance_id: int) -> Optional[Dict[str, Any]]:
         SELECT
             i.*, f.title, f.description, f.allowed_types_json, f.ai_enabled, f.repeat_enabled, f.repeat_type,
             f.repeat_interval_days, f.allow_resubmission, f.question_type, f.number_min, f.number_max, f.number_unit,
-            f.priority, f.creator_user_id, f.creator_role,
+            f.image_upload_count, f.priority, f.creator_user_id, f.creator_role,
             COALESCE(NULLIF(u.display_name, ''), u.username) AS assigned_username
         FROM task_instances i
         JOIN task_forms f ON f.id=i.form_id
@@ -1688,14 +1754,17 @@ def task_list_instances_for_user(*, user_id: int, status: Optional[str] = None) 
     q = """
         SELECT
             i.*, f.title, f.description, f.allowed_types_json, f.ai_enabled, f.allow_resubmission,
-            f.question_type, f.number_min, f.number_max, f.number_unit, f.priority,
+            f.question_type, f.number_min, f.number_max, f.number_unit, f.image_upload_count, f.priority,
+            f.extraction_hints, f.threshold_rules_json, f.ai_engine_type,
             f.creator_role, f.creator_user_id,
             s.submitted_value AS response_value,
             s.file_path AS response_file_path,
             s.file_path_2 AS response_file_path_2,
             s.distance_diff AS response_distance_diff,
             s.fuel_consumed AS response_fuel_consumed,
-            s.ai_result_reference AS ai_result_reference
+            s.ai_result_reference AS ai_result_reference,
+            s.image_taken_at AS response_image_taken_at,
+            s.image_taken_at_2 AS response_image_taken_at_2
         FROM task_instances i
         JOIN task_forms f ON f.id=i.form_id
         LEFT JOIN task_submissions s ON s.task_instance_id=i.id
@@ -1718,7 +1787,8 @@ def task_list_instances_for_scope(*, role: str, team: Optional[int]) -> List[Dic
     q = """
         SELECT
             i.*, f.title, f.description, f.allowed_types_json, f.ai_enabled, f.repeat_enabled, f.repeat_type,
-            f.repeat_interval_days, f.question_type, f.number_min, f.number_max, f.number_unit,
+            f.repeat_interval_days, f.question_type, f.number_min, f.number_max, f.number_unit, f.image_upload_count,
+            f.extraction_hints, f.threshold_rules_json, f.ai_engine_type,
             f.priority, f.creator_role, f.creator_user_id,
             COALESCE(NULLIF(u.display_name, ''), u.username) AS assigned_username,
             s.submitted_value AS response_value,
@@ -1726,7 +1796,9 @@ def task_list_instances_for_scope(*, role: str, team: Optional[int]) -> List[Dic
             s.file_path_2 AS response_file_path_2,
             s.distance_diff AS response_distance_diff,
             s.fuel_consumed AS response_fuel_consumed,
-            s.ai_result_reference AS ai_result_reference
+            s.ai_result_reference AS ai_result_reference,
+            s.image_taken_at AS response_image_taken_at,
+            s.image_taken_at_2 AS response_image_taken_at_2
         FROM task_instances i
         JOIN task_forms f ON f.id=i.form_id
         LEFT JOIN users u ON u.id=i.assigned_user_id
@@ -1790,6 +1862,8 @@ def task_upsert_submission(
     avg_kmpl: Optional[float] = None,
     distance_diff: Optional[float] = None,
     fuel_consumed: Optional[float] = None,
+    image_taken_at: Optional[str] = None,
+    image_taken_at_2: Optional[str] = None,
     ai_requested: bool,
     ai_status: str,
     ai_result_reference: Optional[str],
@@ -1856,6 +1930,12 @@ def task_upsert_submission(
         if "fuel_consumed" in cols:
             sets.append("fuel_consumed=?")
             params.append(fuel_consumed)
+        if "image_taken_at" in cols:
+            sets.append("image_taken_at=?")
+            params.append(image_taken_at)
+        if "image_taken_at_2" in cols:
+            sets.append("image_taken_at_2=?")
+            params.append(image_taken_at_2)
         if legacy_ai_summary:
             sets.append("ai_result_summary=?")
             params.append(ai_result_reference)
@@ -1910,6 +1990,12 @@ def task_upsert_submission(
         if "fuel_consumed" in cols:
             insert_cols.append("fuel_consumed")
             values.append(fuel_consumed)
+        if "image_taken_at" in cols:
+            insert_cols.append("image_taken_at")
+            values.append(image_taken_at)
+        if "image_taken_at_2" in cols:
+            insert_cols.append("image_taken_at_2")
+            values.append(image_taken_at_2)
         if legacy_ai_summary:
             insert_cols.append("ai_result_summary")
             values.append(ai_result_reference)

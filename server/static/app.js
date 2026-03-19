@@ -38,6 +38,68 @@ function buildUploadPreviewUrl(src) {
   return `/api/uploads/preview?src=${encodeURIComponent(raw)}`;
 }
 
+function renderUploadImageCard({ src, title, alt, eager = false }) {
+  const fullSrc = String(src || "").trim();
+  if (!fullSrc) return "";
+  const previewSrc = buildUploadPreviewUrl(fullSrc) || fullSrc;
+  const safeTitle = escapeHtml(title || "Uploaded Image");
+  const safeAlt = escapeHtml(alt || title || "Uploaded Image");
+  const loading = eager ? "eager" : "lazy";
+  return `
+    <div class="imgcard">
+      <div class="small-muted" style="margin-bottom:6px;">${safeTitle}</div>
+      <img
+        src="${previewSrc}"
+        data-fullsrc="${fullSrc}"
+        loading="${loading}"
+        decoding="async"
+        alt="${safeAlt}"
+        style="width:100%;border-radius:10px;border:1px solid #333;"
+      />
+    </div>
+  `;
+}
+
+const warmedUploadPreviews = new Set();
+
+function warmUploadPreview(src) {
+  const previewSrc = buildUploadPreviewUrl(src);
+  if (!previewSrc || warmedUploadPreviews.has(previewSrc)) return;
+  warmedUploadPreviews.add(previewSrc);
+  const img = new Image();
+  img.decoding = "async";
+  img.src = previewSrc;
+}
+
+function warmPreviewFromTrigger(trigger) {
+  if (!trigger) return;
+  const directSrc = String(trigger.dataset?.src || "").trim();
+  const directSrc2 = String(trigger.dataset?.src2 || "").trim();
+  if (directSrc) warmUploadPreview(directSrc);
+  if (directSrc2) warmUploadPreview(directSrc2);
+
+  const row = trigger.closest("tr, .admin-mobile-reading-card");
+  const filename = String(row?.dataset?.filename || "").trim();
+  const filename2 = String(row?.dataset?.filename2 || "").trim();
+  if (filename) warmUploadPreview(`/uploads/${filename}`);
+  if (filename2) warmUploadPreview(`/uploads/${filename2}`);
+}
+
+document.addEventListener("mouseover", (event) => {
+  const trigger = event.target instanceof Element ? event.target.closest(".js-open-image, .js-open-reading") : null;
+  if (trigger) warmPreviewFromTrigger(trigger);
+});
+
+document.addEventListener("focusin", (event) => {
+  const trigger = event.target instanceof Element ? event.target.closest(".js-open-image, .js-open-reading") : null;
+  if (trigger) warmPreviewFromTrigger(trigger);
+});
+
+document.addEventListener("touchstart", (event) => {
+  const trigger = event.target instanceof Element ? event.target.closest(".js-open-image, .js-open-reading") : null;
+  if (trigger) warmPreviewFromTrigger(trigger);
+}, { passive: true });
+
 function setupTabs() {
   const tabs = qsa(".tab");
   const contents = qsa(".tab-content");
@@ -205,6 +267,13 @@ function setupFiltering(tableId, searchId, meterSelectId, statusSelectId = null)
     return keys.some((k) => haystack.includes(` ${k} `) || haystack.includes(k));
   };
 
+  const normalizeStatusBucket = (rawStatus) => {
+    const status = String(rawStatus || "").toLowerCase().trim();
+    if (["submitted", "completed", "late"].includes(status)) return "submitted";
+    if (status === "overdue") return "overdue";
+    return "pending";
+  };
+
   const filter = () => {
     const q = (search.value || "").toLowerCase().trim();
     const meter = meterSel.value;
@@ -215,7 +284,8 @@ function setupFiltering(tableId, searchId, meterSelectId, statusSelectId = null)
       const text = tr.innerText.toLowerCase();
       const qOk = !q || text.includes(q);
       const rowStatus = ((tr.dataset.status || tr.querySelector("td:nth-child(5)")?.innerText || "").toLowerCase()).trim();
-      const statusOk = status === "all" || rowStatus.includes(status);
+      const statusBucket = normalizeStatusBucket(rowStatus);
+      const statusOk = status === "all" || statusBucket === status || rowStatus === status;
       tr.style.display = (meterOk && qOk && statusOk) ? "" : "none";
     });
 
@@ -224,15 +294,21 @@ function setupFiltering(tableId, searchId, meterSelectId, statusSelectId = null)
       const text = card.innerText.toLowerCase();
       const qOk = !q || text.includes(q);
       const cardStatus = (card.dataset.status || "").toLowerCase().trim();
-      const statusOk = status === "all" || cardStatus.includes(status);
+      const statusBucket = normalizeStatusBucket(cardStatus);
+      const statusOk = status === "all" || statusBucket === status || cardStatus === status;
       card.style.display = (meterOk && qOk && statusOk) ? "" : "none";
     });
+
+    document.dispatchEvent(new CustomEvent("dashboard:filter-changed", {
+      detail: { tableId, status, meter, query: q }
+    }));
   };
 
   search.addEventListener("input", filter);
   meterSel.addEventListener("change", filter);
   statusSel?.addEventListener("change", filter);
   filter();
+  return { filter, normalizeStatusBucket };
 }
 
 function openModal({title, sub, images, jsonText}) {
@@ -290,7 +366,7 @@ function wireModal(opts = {}) {
     modalImages.innerHTML = "";
 
     const imgs = [];
-    if (filename) imgs.push({ label: "Uploaded", url: `/uploads/${filename}` });
+      if (filename) imgs.push({ label: "Uploaded", url: buildUploadPreviewUrl(`/uploads/${filename}`) || `/uploads/${filename}` });
     if (row.dataset.debugYolo) imgs.push({ label: "YOLO", url: row.dataset.debugYolo });
     if (row.dataset.debugCrop) imgs.push({ label: "Crop", url: row.dataset.debugCrop });
     if (row.dataset.debugPrep) imgs.push({ label: "Preprocess", url: row.dataset.debugPrep });
@@ -682,7 +758,7 @@ function wireModal() {
       const prep = tr.dataset.debugPrep || "";
 
       const imgs = [];
-      if (filename) imgs.push({ label: "Uploaded", url: "/uploads/" + filename });
+      if (filename) imgs.push({ label: "Uploaded", url: buildUploadPreviewUrl("/uploads/" + filename) || "/uploads/" + filename });
       if (yolo) imgs.push({ label: "YOLO", url: yolo });
       if (crop) imgs.push({ label: "Crop", url: crop });
       if (prep) imgs.push({ label: "Preprocess", url: prep });
@@ -707,12 +783,12 @@ function wireModal() {
       const src = btn.getAttribute("data-src");
       if (!src) return;
 
-      const imagesHtml = `
-        <div class="imgcard">
-          <div class="small-muted" style="margin-bottom:6px;">Uploaded Image</div>
-          <img src="${src}" style="width:100%;border-radius:10px;border:1px solid #333;" />
-        </div>
-      `;
+      const imagesHtml = renderUploadImageCard({
+        src,
+        title: "Uploaded Image",
+        alt: "Uploaded Image",
+        eager: true,
+      });
       openModal("Uploaded Image", "", imagesHtml, "");
     });
   });

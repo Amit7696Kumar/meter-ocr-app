@@ -113,6 +113,8 @@
               data-value="{{ r.value or '' }}"
               data-created="{{ r.created_at }}"
               data-label="{{ r.label }}"
+              data-image-taken="{{ r.image_taken_at or '' }}"
+              data-image-taken2="{{ r.image_taken_at_2 or '' }}"
             >
               <td>{{ r.created_at }}</td>
               <td><b>{{ r.meter_type }}</b></td>
@@ -270,26 +272,28 @@
     }
 
     imgs.forEach(item => {
-      const div = document.createElement("div");
-      div.className = "imgcard";
-      div.innerHTML = `
-        <div class="imgcap">
-          <div class="small-muted"><b>${item.title}</b></div>
-        </div>
-        <img src="${item.src}" alt="${item.title}" />
-      `;
-      modalImages.appendChild(div);
+      modalImages.insertAdjacentHTML("beforeend", renderUploadImageCard({
+        src: item.src,
+        title: item.title,
+        alt: item.title,
+        eager: true,
+      }));
     });
   }
 
   function openRow(row) {
     const created = row.dataset.created || "";
+    const imageTaken = row.dataset.imageTaken || "";
+    const imageTaken2 = row.dataset.imageTaken2 || "";
     const meter = (row.dataset.meter || "").toUpperCase();
     const label = row.dataset.label || "";
     const value = row.dataset.value || "-";
 
     modalTitle.textContent = `${meter} • ${value}`;
-    modalSub.textContent = `${created} — ${label}`;
+    const parts = [`${created}`, label];
+    if (imageTaken) parts.push(`Image taken: ${imageTaken}`);
+    if (imageTaken2) parts.push(`Second image taken: ${imageTaken2}`);
+    modalSub.textContent = parts.filter(Boolean).join(" — ");
     buildImages(row);
     openModal();
   }
